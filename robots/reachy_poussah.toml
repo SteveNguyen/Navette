@@ -123,7 +123,7 @@ turned_deg = 20.0
 retries = 2
 
 [adapter]
-# Files the robot needs, relative to this file (not in the repository):
+# Files the robot needs, relative to this file (calib/: the reference unit's, in the repository; the model is not):
 #   model       floor segmentation model (.onnx, input "input" 1x3x192x320, 2 or 3 output channels)
 #   calib       camera intrinsics: {"image_resolution": [W, H], "K": 3x3, "D": OpenCV distortion}
 #   r_cam_imu   {"R_cam_imu": 3x3}, IMU axes -> camera axes

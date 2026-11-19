@@ -39,8 +39,9 @@ The robot config `robots/reachy_poussah.toml` names four files in its `[adapter]
 | `r_cam_imu` | `calib/R_cam_imu.json` | rotation from the head IMU's axes to the camera's |
 | `handeye` | `calib/handeye_X.json` | camera pose in the head frame |
 
-The three calibration files of the reference unit fit another Reachy Mini of the same hardware closely enough to
-start (same lens, same head). The calibration tools are not part of Navette yet.
+The three calibration files are in the repository, `robots/calib/`: they are the reference unit's, and fit another
+Reachy Mini of the same hardware closely enough to start (same lens, same head). The calibration tools are not
+part of Navette yet. Only the floor model has to be fetched.
 
 Check `[adapter]` in the config: `base_link` (`"ble"` or `"usb"`), `ble_name` (the base's Bluetooth name, from its
 `[hello] name=`), `usb_port`.
@@ -54,7 +55,7 @@ ssh pollen@reachy-mini.local "mkdir -p ~/navette/wheel ~/navette/pylib ~/navette
 scp navette/target/wheels/navette-*.whl pollen@reachy-mini.local:navette/wheel/
 scp navette/robots/reachy_poussah.toml pollen@reachy-mini.local:navette/robot/
 scp floor.onnx pollen@reachy-mini.local:navette/robot/models/
-scp calib.json R_cam_imu.json handeye_X.json pollen@reachy-mini.local:navette/robot/calib/
+scp navette/robots/calib/*.json pollen@reachy-mini.local:navette/robot/calib/
 ```
 
 Install into a private folder, without dependencies: the robot's app environment (`/venvs/apps_venv`) already
