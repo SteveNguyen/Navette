@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/navette-core", "crates/navette-py"]
+# `cargo test` / `cargo build` at the root act on the pure-Rust core only: the bindings crate is an extension
+# module (needs a Python interpreter to link) and is built by maturin.
+default-members = ["crates/navette-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

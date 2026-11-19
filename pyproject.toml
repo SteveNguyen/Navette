@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "navette"
+version = "0.1.0"
+description = "Monocular floor-mask navigation: Rust core with Python bindings"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# Lens model of the camera adapter (navette.rays): the core itself only takes viewing rays.
+opencv = ["opencv-python>=4.8"]
+
+[dependency-groups]
+dev = ["pytest", "maturin>=1.9,<2", "opencv-python>=4.8"]
+
+[tool.maturin]
+manifest-path = "crates/navette-py/Cargo.toml"
+python-source = "python"
+module-name = "navette._core"
+profile = "release"
+
+[tool.uv]
+# Rebuild the extension on `uv sync` / `uv run` when the Rust sources change.
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "crates/**/*.rs" }, { file = "crates/**/Cargo.toml" }]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

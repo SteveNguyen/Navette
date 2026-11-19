@@ -1,0 +1,15 @@
+[package]
+name = "navette-py"
+description = "Python bindings of navette-core (module navette._core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+navette-core = { path = "../navette-core" }
+pyo3 = { version = "0.30", features = ["abi3-py310"] }
+numpy = "0.30"

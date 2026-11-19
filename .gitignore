@@ -1,0 +1,10 @@
+target/
+.venv/
+__pycache__/
+.pytest_cache/
+*.so
+*.egg-info/
+logs/
+data/
+models/
+*.onnx
