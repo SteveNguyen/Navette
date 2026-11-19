@@ -37,6 +37,9 @@ scan = fs.scan(floor_mask, up_c, cam_h)  # bool (192, 320) mask, 'up' in the cam
 out = nav.step(t, dt, pose, scan, cam_h, a, v, w, v_prev)  # out.v, out.w: what to send; out.state
 ```
 
+Invalid parameters raise ValueError. `scan` and `step` release the GIL while they work; a navigator (and its
+grid) belongs to one thread: used from another during a call, it raises RuntimeError.
+
 ## Build
 
 Needs a Rust toolchain and [uv](https://docs.astral.sh/uv/). From the repository root:
@@ -85,18 +88,23 @@ monitor instead of exploring. Each run writes a folder (`RUNS/<date-time>/`: fra
    the base's dead-man), and two functions, `open(cfg, out_dir, dry_run, use_base, log)` and
    `open_replay(cfg, run_dir)`, that return them as a `Robot`. `navette.robots.reachy_poussah` is the example.
 2. Write its config, `robots/<name>.toml`: every key of `robots/reachy_poussah.toml` is required
-   (`[robot] adapter` is the module's name; `[adapter]` is the adapter's own table).
+   (`[robot] adapter` is the module's name; `[adapter]` is the adapter's own table) and range-checked on
+   load. The footprint, the camera's blind distance and the speeds given there reach the grid, the planner
+   and the arc controller (`navette.runtime.loop.navigator_params`); their other parameters are the core's
+   defaults.
 3. Run the conformance checks on the real devices before the runtime ever drives them:
 
    ```python
    from navette.testing import conformance
-   conformance.check_camera(robot.camera)
+   conformance.check_camera(robot.camera, max_offset_m=0.5 * radius)  # radius: the config's footprint.radius
    conformance.check_imu(robot.imu)    # robot standing still
-   conformance.check_base(robot.base)  # ROBOT MOTION: ~0.1 m forward, a ~0.3 rad turn, then stop and park
+   conformance.check_base(robot.base, stop_s=1.0)  # ROBOT MOTION: ~0.15 m forward, a ~0.3 rad turn, stop, park
    ```
 
-   They check units, signs, timestamps, the session and the dead-man; `tests/test_conformance_fake.py` shows
-   them catching wrong adapters.
+   They check units, signs, timestamps, the camera's mounting (looking along the base's forward axis, close
+   to its centre: the navigator supports nothing else yet), IMU samples that are measurements from the first
+   one, the session, the dead-man, and that `stop()` brakes (`stop_s`: the time your base needs to stop from
+   0.1 m/s); `tests/test_conformance_fake.py` shows them catching wrong adapters.
 4. First runs: `--dry-run`, then `--behaviour forward` toward an obstacle, then exploration.
 
 ## Bench

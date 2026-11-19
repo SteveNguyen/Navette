@@ -30,7 +30,8 @@ Dry run: the link's transport drops every command (poussah_link.LoggedTransport)
 and never names us controller: start() skips the [hello] check and status() says DRIVING at once, without the
 Balancing and controller checks. Events and the [nav] age are watched as in a real run.
 
-After a watchdog halt (stop() without park()) the base keeps balancing; its idle rule sits it down 3.5 s later.
+After a watchdog halt (stop() without park()) the base keeps balancing; it sits down 3.5 s after the last nv:
+the 0.5 s of its dead-man, then the 3 s of its idle rule (the firmware's pnk and pni).
 """
 import time
 

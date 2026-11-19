@@ -62,20 +62,32 @@ Out of scope: simulation, calibration, data collection and model training tools.
 - **The floor model sits behind `Camera`** (the adapter returns a mask): a robot with a depth camera or a
   lidar can feed a mask or a scan without touching the core.
 - **abi3 wheel**, cross-built for aarch64 (the Mini has no room for a toolchain).
-- **Robot parameters come from the config file**, not from constants in code.
+- **Robot parameters come from the config file**, not from constants in code: the collision monitor's, and
+  what the grid, the planner and the arc controller need of the robot's geometry and speeds (footprint,
+  clearance, blind distance, candidate speeds), derived in one place (`runtime/loop.py`, `navigator_params`).
+  The rest of their parameters is tuning and keeps the core's defaults.
+- **Parameters are validated** where an object is built (`validate()` in the core, ValueError in Python, the
+  key named when it comes from the config): a bad value is an error, not a hang or a check that never fires.
+- **One thread per navigator.** The long calls of the bindings release the GIL (the command thread and the
+  page keep running during a slow plan); an object used from another thread during a call raises.
 - **Apache-2.0.**
 
 ## Robot contract (python/navette/interfaces.py)
 
 | Interface | Methods | Contract |
 |---|---|---|
-| `Camera` | `read() -> Frame` (`t`, `index`, `T_base_cam`), `segment(frame) -> floor mask`, `rays`, `rays_low`, `mask_shape` | bool mask; per-pixel rays; `t` = capture time, monotonic clock |
-| `Imu` | `read() -> [(t, gyro, acc)]` | camera frame, rad/s, m/s^2, all samples since the last call |
-| `Base` | `odometry() -> (t, x, y, theta, v, w)`, `command(v, w)`, `start()`, `stop()`, `park()`, `status()`, `balancing` | x forward, theta counter-clockwise, m, rad; the base stops by itself when commands stop (dead-man); faults are reported |
+| `Camera` | `read() -> Frame` (`t`, `index`, `T_base_cam`), `segment(frame) -> floor mask`, `rays`, `rays_low`, `mask_shape` | C-contiguous bool mask; per-pixel rays; `t` = capture time, monotonic clock; mounted looking along the base's +x (yaw within 10 deg), close to the vertical through the base centre |
+| `Imu` | `read() -> [(t, gyro, acc)]` | camera frame, rad/s, m/s^2, all samples since the last call, every one a finite measurement |
+| `Base` | `odometry() -> (t, x, y, theta, v, w)`, `command(v, w)`, `start()`, `stop()`, `park()`, `status()`, `balancing` | x forward, theta counter-clockwise, m, rad; the base stops by itself when commands stop (dead-man; afterwards it resumes on the next command or reports a fault); `stop()` brakes and latches; faults are reported |
 | `Head` (optional) | `look_down()`, `look_back()`, `is_back()` | only for robots with a movable camera |
 
 A new robot = these classes + a config file, validated by `navette.testing`'s conformance checks (README,
 Adding a robot).
+
+Camera mounting: the navigator's robot frame is the camera's heading frame at the base centre; of
+`T_base_cam` it uses the heading and the height. A camera looking sideways, or far from the base centre, is
+not supported yet (the conformance check fails, the loop warns): a general camera-to-base transform of the
+scan is future work.
 
 ## Localization and SLAM
 
@@ -133,6 +145,14 @@ inputs the prototype handled unsafely, and on purpose:
   sectors at `unseen_m` all round, which lets a robot that sees no floor at all creep forward for ever.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
+- **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).
+- **Occupancy grid**: only the last `max_keyframes` keyframes (4000) are kept. The grid is the same; a
+  `replay()` rebuilds it from the keyframes kept.
+- **Bindings**: a floor mask is read by its values whatever its memory layout.
+
+Unchanged on purpose: the controller's speed cap (`controller.v_max`) scales the command after the collision
+monitor and does not limit the arc controller's candidate speeds (`explore.v_set`), as in the prototype's
+live loop. The planner's search stops once every frontier cell is settled: same plans.
 
 ## Phases
 
@@ -143,7 +163,7 @@ inputs the prototype handled unsafely, and on purpose:
 | 2 | exploration/frontier, controller/dwa, navigator | goldens, golden sequences, closed loop | done |
 | 3 | Python runtime: config, interfaces, loop + controller, replay, phone page, Poussah driver, Reachy adapter, conformance tests | runtime tests with the fake robot | done |
 | 4 | Integration: the runtime on the real core, end to end without hardware, replay of real runs against the prototype; benchmarks; aarch64 wheel | end-to-end tests, real-run comparison, bench table (README) | done; the wheel is built and inspected, not run on an aarch64 machine yet |
-| 5 | Independent review, fixes | review findings closed | under way |
+| 5 | Independent review, fixes | review findings closed, each with a test (bad IMU sample, mask layout, parameter validation, keyframe bound, contract and conformance gaps, geometry from the config, GIL) | done |
 | 6 | On the robot: conformance checks, timing, then the staged live tests again | needs a go | not started |
 
 Phases 1 and 3 ran in parallel after phase 0.
