@@ -1,0 +1,143 @@
+# Installing Navette
+
+Two machines: a **laptop** (Linux, x86-64) builds and tests, and the **robot** (Reachy Mini Wireless, Raspberry
+Pi CM4, 64-bit Raspberry Pi OS) runs. The robot has too little disk space for a Rust toolchain, so the wheel is
+cross-built on the laptop and copied over. Nothing here touches the robot's own Python environments.
+
+Reference setup: Reachy Mini on the Poussah base, base firmware `hoverboard-nav` 8c704f1 or later (it loads
+its Mini settings from its seat switch). Commands assume the robot answers as `reachy-mini.local` and its user
+is `pollen`.
+
+## 1. Laptop
+
+Prerequisites: [uv](https://docs.astral.sh/uv/), [rustup](https://rustup.rs/) (stable toolchain), git.
+
+```bash
+git clone <navette repository> navette
+uv sync --project navette                       # builds the extension, installs the dev tools
+uv run --project navette pytest -q navette/tests    # ~1.5 min, no hardware
+cargo test --manifest-path navette/Cargo.toml
+```
+
+Build the robot's wheel (aarch64, abi3: any CPython >= 3.10, glibc >= 2.17):
+
+```bash
+rustup target add aarch64-unknown-linux-gnu      # once
+uv tool run --with ziglang maturin build --release --target aarch64-unknown-linux-gnu --zig \
+    -m navette/crates/navette-py/Cargo.toml
+# -> navette/target/wheels/navette-0.1.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
+```
+
+## 2. Files the robot needs
+
+The robot config `robots/reachy_poussah.toml` names four files in its `[adapter]` table, relative to the config:
+
+| Key | File | Where it comes from |
+|---|---|---|
+| `model` | `models/floor.onnx` | the floor segmentation model of the `floor_seg` project (`v7_floor_under` for now; private development model until the public one is released: ask the maintainers) |
+| `calib` | `calib/calib.json` | camera intrinsics `{"image_resolution", "K", "D"}` of the head camera |
+| `r_cam_imu` | `calib/R_cam_imu.json` | rotation from the head IMU's axes to the camera's |
+| `handeye` | `calib/handeye_X.json` | camera pose in the head frame |
+
+The three calibration files of the reference unit fit another Reachy Mini of the same hardware closely enough to
+start (same lens, same head). The calibration tools are not part of Navette yet.
+
+Check `[adapter]` in the config: `base_link` (`"ble"` or `"usb"`), `ble_name` (the base's Bluetooth name, from its
+`[hello] name=`), `usb_port`.
+
+## 3. Robot
+
+Copy the wheel, the config and its files (the robot keeps them under `~/navette/`):
+
+```bash
+ssh pollen@reachy-mini.local "mkdir -p ~/navette/wheel ~/navette/pylib ~/navette/robot/models ~/navette/robot/calib ~/navette/runs"
+scp navette/target/wheels/navette-*.whl pollen@reachy-mini.local:navette/wheel/
+scp navette/robots/reachy_poussah.toml pollen@reachy-mini.local:navette/robot/
+scp floor.onnx pollen@reachy-mini.local:navette/robot/models/
+scp calib.json R_cam_imu.json handeye_X.json pollen@reachy-mini.local:navette/robot/calib/
+```
+
+Install into a private folder, without dependencies: the robot's app environment (`/venvs/apps_venv`) already
+has numpy, OpenCV, onnxruntime, FastAPI and uvicorn, and they must not be replaced. Only the Bluetooth client is
+missing:
+
+```bash
+ssh pollen@reachy-mini.local
+/venvs/apps_venv/bin/python -m pip install --no-deps --upgrade --target ~/navette/pylib \
+    ~/navette/wheel/navette-0.1.0-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
+/venvs/apps_venv/bin/python -m pip install --target ~/navette/pylib bleak    # once; brings dbus-fast
+```
+
+(A later `--upgrade` of the wheel replaces the `navette` package only.) Check:
+
+```bash
+PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -c "import navette, bleak; print(navette.Navigator())"
+PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -c \
+    "from navette.config import load; load('$HOME/navette/robot/reachy_poussah.toml'); print('config ok')"
+```
+
+Optional, once per software version: the test suite on the robot (~7 min; copy `navette/tests` over first). It
+checks that the CM4's maths library gives the same results as the laptop:
+
+```bash
+PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m pytest -q -p no:cacheprovider ~/navette/tests
+```
+
+## 4. Before each session
+
+- **Wake the robot**: its motors must be enabled (from the dashboard, or
+  `curl -X POST http://localhost:8000/api/motors/set_mode/enabled` on the robot). With the motors off the head
+  cannot reach its navigation pose and the run refuses to start.
+- **No other app** may hold the robot (`curl http://localhost:8000/api/apps/current-app-status` says `null`).
+- **Base**: powered, sitting still for a few seconds after boot (it learns its gyro offset), Mini on top
+  (seat switch: `[diag] mini=1`).
+- **Disk**: a run writes ~20 MB per minute of frames; keep an eye on `df -h /` and copy runs off (below).
+- **Room**: ~0.3 m free in front of and behind the robot at START (the stand-up sways ~±14 cm).
+
+## 5. Run
+
+On the robot:
+
+```bash
+cd ~/navette
+PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
+    --robot ~/navette/robot/reachy_poussah.toml --out ~/navette/runs --behaviour explore
+```
+
+- The head moves to its navigation pose at once. **The base does not move until START.**
+- Open the status page on a phone or laptop on the same network: `http://reachy-mini.local:8090/` (Android does
+  not resolve `.local` names: use the robot's IP address). START, STOP; pushing an antenna is also a STOP.
+- The robot halts by itself if the page stops polling for 2 s, if perception goes stale, or on a base fault.
+- `--behaviour forward`: straight ahead through the collision monitor. `--dry-run`: everything runs, nothing is
+  sent to the base. `--no-base`: no base at all (head and camera only).
+- Ctrl-C ends the program (the base is stopped and sat down). If the ssh session drops, the program ends too and
+  the base's own dead-man stops it; to run independently of the ssh session, start it with `setsid -f` and a log
+  file.
+
+## 6. After a run
+
+Each run is a folder `~/navette/runs/<date-time>/` (frames, IMU, base link log, `steps.csv`, `commands.csv`,
+`meta.json`). Recorded frames show the inside of a home: keep them private. Copy it to the laptop and free the
+robot's disk:
+
+```bash
+scp -r pollen@reachy-mini.local:navette/runs/<date-time> <private folder>/
+ssh pollen@reachy-mini.local "rm -rf ~/navette/runs/<date-time>"
+```
+
+Replay it on the laptop (the model and calibration files beside a copy of the config, as on the robot):
+
+```bash
+uv run --project navette --extra reachy-poussah python -m navette.runtime \
+    --robot <config folder>/reachy_poussah.toml --replay <private folder>/<date-time> --out <output folder>
+```
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `head not at the navigation pose ... motors disabled?` | wake the robot (section 4) |
+| START refused: `not ready to stand` / `sitting down` | the base is still settling on its rest after a sit: wait a second, press START again |
+| START refused: `setup=...` | the base is not calibrated (firmware setup must be 7) |
+| `no [nav] from the base` | base off, out of Bluetooth range, or `ble_name` wrong |
+| page unreachable from a phone | `.local` name on Android: use the IP; the robot's WiFi can also drop (the run then halts by itself) |
