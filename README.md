@@ -48,7 +48,7 @@ Needs a Rust toolchain and [uv](https://docs.astral.sh/uv/). From the repository
 ## Test
 
     cargo test                                        # the core's own tests
-    uv run --with fastapi --with httpx pytest         # everything else (without fastapi: the page tests skip)
+    uv run pytest                                     # everything else
     cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all
 

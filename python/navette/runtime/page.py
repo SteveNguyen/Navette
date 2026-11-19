@@ -13,7 +13,7 @@ send them with a plain form or a "simple" fetch: a cross-origin JSON POST needs 
 server does not answer (no CORS middleware: keep it that way). Our own page is same-origin, so its buttons work.
   GET  /api/preview.jpg  latest camera | map view, 503 before the first one
 
-fastapi is imported here only (robot side; the tests skip without it).
+fastapi is imported here only (robot side; it is in the dev dependency group for the tests).
 """
 
 PAGE = """<!doctype html>

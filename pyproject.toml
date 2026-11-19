@@ -21,7 +21,8 @@ page = ["fastapi", "uvicorn"]
 reachy-poussah = ["opencv-python>=4.8", "onnxruntime", "bleak", "pyserial", "fastapi", "uvicorn"]
 
 [dependency-groups]
-dev = ["pytest", "maturin>=1.9,<2", "opencv-python>=4.8"]
+# fastapi and httpx: the status page's tests (tests/test_runtime_page.py) run by default.
+dev = ["pytest", "maturin>=1.9,<2", "opencv-python>=4.8", "fastapi", "httpx"]
 
 [tool.maturin]
 manifest-path = "crates/navette-py/Cargo.toml"
