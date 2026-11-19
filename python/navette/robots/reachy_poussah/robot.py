@@ -302,7 +302,7 @@ def connect_base(adapter, out_dir, dry_run, log):
     ok, why = link.hello_ok()
     if not ok:
         log(f"base: WARNING {why}: START will be refused (except in a dry run)")
-    return PoussahBase(link, dry_run, log=log)
+    return PoussahBase(link, dry_run, log=log, balance_angle_deg=adapter.get("balance_angle_deg"))
 
 
 class ReachyPoussah:

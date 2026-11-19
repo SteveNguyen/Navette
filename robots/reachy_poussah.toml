@@ -110,3 +110,6 @@ base_link = "ble"        # "ble" or "usb"
 ble_name = "rmini_wheels"
 usb_port = "/dev/ttyACM0"
 nav_rate_hz = 50         # the base's telemetry rate
+# Balance angle sent before each stand-up (O<deg>, the base forgets it at reboot). With the Mini on: at 0 the
+# base stands ~7 cm ahead of its position goal (11-15 cm settle roll after S0); 2.4 -> 3.5 cm (firmware floor test).
+balance_angle_deg = 2.4

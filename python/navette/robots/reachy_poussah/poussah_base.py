@@ -68,8 +68,14 @@ class PoussahBase:
 
     balancing = True
 
-    def __init__(self, link, dry_run=False, clock=time.monotonic, log=print):
+    def __init__(self, link, dry_run=False, clock=time.monotonic, log=print, balance_angle_deg=None):
+        """balance_angle_deg: sent (O<deg>) before each stand-up, None = never sent (the base's boot value, 0).
+        With the Mini on, 2.4: at 0 the base stands ~7 cm ahead of its position goal to hold the Mini's forward
+        centre of mass, which made the 11-15 cm settle roll after S0 and offset [nav] lag; at 2.4 the roll is
+        3.5 cm (firmware floor test). The base forgets it at reboot, so it is sent every time."""
         self.link, self.dry_run, self.clock, self.log = link, dry_run, clock, log
+        self.balance_angle_deg = balance_angle_deg
+        self._ready_bit_seen = False  # [nav] f READY_TO_STAND seen once: this firmware has it
         self._session = False    # between start() and stop()
         self._ready = False      # Balancing reached in this session
         self._fault = None       # reason, kept until stop()
@@ -105,7 +111,13 @@ class PoussahBase:
         nav = self.link.latest()[0]
         if nav is None:
             raise StartRefused("no [nav] from the base")
-        if self._sitting_down and nav.st == pl.STOPPED:
+        self._ready_bit_seen |= bool(nav.f & pl.F_READY_TO_STAND)
+        if self._ready_bit_seen and nav.st == pl.STOPPED:
+            # the firmware says when an S0 would pass its tilt check: no guessed delay
+            if not nav.f & pl.F_READY_TO_STAND:
+                raise StartRefused("the base is not ready to stand yet (still settling on its rest): try again")
+            self._sitting_down, self._sat_at = False, None
+        if self._sitting_down and nav.st == pl.STOPPED:  # firmware without that bit
             # just landed: the base refuses S0 ("tilt filter off") while it still rocks on its rest (floor test:
             # S0 20 ms after Stopped, tilt still rising 10.8 -> 13.9 deg). Wait SIT_SETTLE_S after landing.
             if self._sat_at is None:
@@ -125,6 +137,8 @@ class PoussahBase:
         self.link.resume()
         self.link.send_velocity(0.0, 0.0)  # the claim
         if nav.st == pl.STOPPED:
+            if self.balance_angle_deg is not None:
+                self.link.balance_angle(self.balance_angle_deg)  # while Stopped, after the claim
             self._stood = True  # before the write: a stop must sit it even if the write fails half-way
             self.link.stand()
 
@@ -157,6 +171,8 @@ class PoussahBase:
             self._next_sync = now + SYNC_S
             self.link.sync()  # a dead link: the next write raises LinkError and the controller halts
         nav = self.link.latest()[0]
+        if nav is not None:
+            self._ready_bit_seen |= bool(nav.f & pl.F_READY_TO_STAND)
         events = self._drain_events()
         low = bool(nav is not None and nav.f & pl.F_LOW_BATTERY)
         silent = nav is None or now - nav.t_recv > NAV_STALE_S

@@ -45,6 +45,7 @@ STOPPED, LIFTOFF, BALANCING, STOPPING = 0, 1, 2, 3
 F_IMU_OK, F_TILT_TRUSTED, F_MOTORS_ON, F_DEADMAN, F_LOW_BATTERY = 1, 2, 4, 8, 16
 F_CTRL_USB, F_CTRL_BLE = 32, 64  # which link is the controller (nav-link-api.md section 4)
 F_GZ_OK = 128  # the base has learnt its gyro offset (about 1 s after a still boot): gz is usable for heading
+F_READY_TO_STAND = 256  # Stopped, still on its rest, an S0 now passes the tilt check (recent firmware only)
 CTRL_BIT = {"usb": F_CTRL_USB, "ble": F_CTRL_BLE}
 
 NH, NS, NZ = "nh", "ns", "nz"  # hello, halt (decel ramp to 0, keeps balancing), zero pl/pr
@@ -407,6 +408,12 @@ class BaseLink:
         """Allow send_velocity() again after halt() / connect()."""
         with self._tx, self._lock:
             self._halted = False
+
+    def balance_angle(self, deg):
+        """O<deg>: the tilt the balance loop holds instead of 0 (-8..8 deg, RAM only, 0 at boot; while Stopped)."""
+        if not (math.isfinite(deg) and -8.0 <= deg <= 8.0):
+            raise ValueError(f"balance angle {deg} deg: must be within -8..8")
+        self._write(f"O{deg:g}")
 
     def stand(self):
         self._write(STAND)

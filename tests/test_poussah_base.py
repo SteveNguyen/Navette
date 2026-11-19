@@ -184,6 +184,39 @@ def test_start_refused_while_the_base_sits_down_after_its_own_stop():
     assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
 
 
+def test_balance_angle_sent_before_each_stand_up_only():
+    """O2.4 after the claim, before S0 (it must reach the base while Stopped); not when already balancing; never
+    in a dry run (the logged transport drops it)."""
+    r = Rig(st=0)
+    r.base.balance_angle_deg = 2.4
+    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "O2.4", "S0"]
+    b = Rig(st=2)
+    b.base.balance_angle_deg = 2.4
+    assert b.ctrl.start()[0] and b.sent() == ["nv0,0,1"]
+    with pytest.raises(ValueError):
+        b.link.balance_angle(9.0)
+
+
+def test_balance_angle_dropped_in_a_dry_run(tmp_path):
+    d = Rig(st=0, dry_run=True, tmp_path=tmp_path)
+    d.base.balance_angle_deg = 2.4
+    assert d.ctrl.start()[0] and all(s.startswith(bl.DRY_OK) for s in d.tr.sent)
+
+
+def test_start_waits_for_the_ready_to_stand_bit_when_the_firmware_has_it():
+    """f bit 256: Stopped and an S0 would pass the tilt check now. Once seen, START on a sitting base needs it
+    (instead of the fixed wait after a sit)."""
+    r = Rig(st=0, f=7 | bl.F_READY_TO_STAND)
+    r.step(st=0)  # idle tick: the bit is seen
+    r.f = 7  # just sat / still rocking: not ready
+    r.step(st=0)
+    ok, msg = r.ctrl.start()
+    assert not ok and "not ready to stand" in msg and r.sent() == []
+    r.f = 7 | bl.F_READY_TO_STAND
+    r.step(st=0)
+    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
+
+
 def test_start_right_after_our_own_park_waits_for_the_landing():
     """STOP sits the base (S1); a START pressed while it lands would get "tilt filter off": refused until it
     has been on its rest SIT_SETTLE_S."""
