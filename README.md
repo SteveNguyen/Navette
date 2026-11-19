@@ -6,7 +6,8 @@ watchdogs, logs, replay, phone page); one adapter and one config file per robot.
 the Poussah self-balancing base. Plan and decisions: [docs/PLAN.md](docs/PLAN.md).
 
 What it does each frame: floor mask -> per-bearing scan (a virtual laser scan) -> occupancy grid ->
-behaviour (frontier exploration, or straight ahead) -> collision monitor -> velocity smoother -> (v, w).
+behaviour (frontier exploration, straight ahead, or a joystick on the phone page) -> collision monitor ->
+velocity smoother -> (v, w).
 
 ## Layout
 
@@ -76,8 +77,11 @@ config (for the Reachy Mini: the floor model and three calibration files, see `r
 SDK already brings them.) Nothing moves before START on the status page (`http://<robot>:8090/`); STOP, a watchdog (stale perception,
 base fault, page silent) or the end of the exploration stops the base. `--dry-run`: everything runs, nothing
 is sent to the base; `--no-base`: no base at all. `--behaviour forward` drives straight through the collision
-monitor instead of exploring. Each run writes a folder (`RUNS/<date-time>/`: frames, IMU, base lines,
-`steps.csv`, `commands.csv`) that replays on a laptop:
+monitor instead of exploring. `--behaviour teleop` puts a touch joystick on the status page: the operator drives,
+still through the collision monitor and every watchdog, and the robot stops 0.5 s after the last joystick
+update (`[teleop] timeout_s`); `--session NAME` names a recording session in the run's `meta.json`
+([docs/INSTALL.md](docs/INSTALL.md), "Run"). Each run writes a folder (`RUNS/<date-time>/`: frames, IMU, base
+lines, `steps.csv`, `commands.csv`, `meta.json`) that replays on a laptop:
 
     uv run --extra reachy-poussah python -m navette.runtime --robot robots/reachy_poussah.toml --replay RUNS/<run> --out OUT
 

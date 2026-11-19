@@ -2,10 +2,14 @@
 
     python -m navette.runtime --robot robots/reachy_poussah.toml --out RUNS            the loop on the robot
     python -m navette.runtime --robot robots/reachy_poussah.toml --out OUT --replay RUN  a recorded run again
+    python -m navette.runtime --robot robots/reachy_poussah.toml --out RUNS --behaviour teleop --session NAME
+                                                                         driven by hand from the phone page
 
 On the robot: a run folder RUNS/<YYYYmmdd-HHMMSS>/ (navette.runtime.loop + the adapter's recordings), the status
 page on page.port. Nothing moves before START on the page. --dry-run: everything runs, nothing moves the base
-(the adapter's base only reads); --no-base: no base at all, the commands are only logged.
+(the adapter's base only reads); --no-base: no base at all, the commands are only logged. --behaviour teleop:
+the page shows a joystick, whose requests go through the collision monitor; --session: a name for the
+recording session, kept in the run's meta.json.
 --replay also takes a folder of runs (each replayed in its own output folder).
 The other options override the robot config for this run.
 """
@@ -13,6 +17,7 @@ import argparse
 import glob
 import importlib
 import os
+import re
 import signal
 import threading
 import time
@@ -33,17 +38,31 @@ def stop_on_signals():
         signal.signal(sig, _interrupt)
 
 
+SESSION_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def session_name(text):
+    """--session's type: a name the dataset import can use as is (lower case, digits, '_' and '-', at most 32,
+    not starting with a separator)."""
+    if not SESSION_RE.fullmatch(text):
+        raise argparse.ArgumentTypeError(f"{text!r}: expected [a-z0-9][a-z0-9_-]{{0,31}}")
+    return text
+
+
 def build_parser():
     ap = argparse.ArgumentParser(prog="python -m navette.runtime", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--robot", required=True, help="robot config (TOML)")
     ap.add_argument("--out", required=True, help="robot: parent of the run folders; replay: output folder")
     ap.add_argument("--replay", help="replay this recorded run (or folder of runs) instead of running the robot")
-    ap.add_argument("--behaviour", choices=["explore", "forward"],
+    ap.add_argument("--behaviour", choices=list(config.BEHAVIOURS),
                     help="explore: frontier exploration; forward: straight at --forward-v through the collision "
-                         "monitor. A replay uses the run's own")
+                         "monitor; teleop: driven from the page's joystick, through the collision monitor. A "
+                         "replay uses the run's own")
     ap.add_argument("--forward-v", type=float, help="forward behaviour's request (m/s); still capped by --v-max")
     rob = ap.add_argument_group("robot")
+    rob.add_argument("--session", type=session_name,
+                     help="recording session name ([a-z0-9][a-z0-9_-]{0,31}), stored in the run's meta.json")
     rob.add_argument("--dry-run", action="store_true", help="nothing moves the base: commands are logged, not sent")
     rob.add_argument("--no-base", action="store_true", help="do not connect to the base")
     rob.add_argument("--v-max", type=float, help="speed cap (m/s), after the collision monitor")
@@ -81,7 +100,7 @@ def run_robot(args, stop_event, web_app=None, log=print, **adapter_kw):
     robot = adapter.open(cfg, out_dir, dry_run=args.dry_run, use_base=not args.no_base, log=log, **adapter_kw)
     try:
         loop.run(robot, cfg, out_dir, stop_event, make_navigator, behaviour=behaviour, forward_v=forward_v,
-                 dry_run=args.dry_run, web_app=web_app, log=log)
+                 dry_run=args.dry_run, web_app=web_app, log=log, session=args.session)
     finally:
         robot.close()
 

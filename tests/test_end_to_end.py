@@ -50,8 +50,10 @@ class Live:
     """loop.run on a FakeRobot in a thread, with the navigator and the attitude filter the command line
     builds (loop.default_navigator, loop.default_up_filter)."""
 
-    def __init__(self, tmp_path, world, cfg, behaviour="explore", patch=None, **robot_kw):
-        """patch(robot): changes the fake robot before the loop starts. robot_kw: FakeRobot's."""
+    def __init__(self, tmp_path, world, cfg, behaviour="explore", patch=None, web_app=None, session=None,
+                 **robot_kw):
+        """patch(robot): changes the fake robot before the loop starts. web_app: gets the page's routes.
+        robot_kw: FakeRobot's."""
         self.robot, self.world, self.cfg, self.out = FakeRobot(world, **robot_kw), world, cfg, tmp_path
         if patch is not None:
             patch(self.robot)
@@ -65,7 +67,7 @@ class Live:
         self.thread = threading.Thread(target=loop.run, daemon=True, args=(
             self.robot, cfg, str(tmp_path), self.stop_event, make_navigator),
             kwargs={"behaviour": behaviour, "on_controller": lambda c: setattr(self, "ctrl", c),
-                    "log": self.logs.append})
+                    "log": self.logs.append, "web_app": web_app, "session": session})
         self.thread.start()
         self.wait(lambda: "ready" in self.logs, "the loop")
 
@@ -184,6 +186,63 @@ def test_forward_stops_before_the_box(tmp_path):
     steps = r.end()
     assert {s["state"] for s in steps} == {"FORWARD"}
     assert float(steps[-1]["v"]) == 0.0 and float(steps[-1]["v_req"]) == 0.15
+
+
+def test_teleop_driven_by_the_page_joystick(tmp_path):
+    """--behaviour teleop, the real core, driven only through the page's HTTP API as the phone's joystick does
+    (~10 Hz posts while the thumb is down): it drives, stops by itself when the posts stop (operator dead-man),
+    is held by the collision monitor before the box while the joystick still says forward, turns in place,
+    and STOP stops. The session name is in meta.json."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from navette.runtime import page
+
+    world, app = FakeWorld(walls=BOX_AHEAD), page.new_app()
+    r = Live(tmp_path, world, fake_config(), behaviour="teleop", web_app=app, session="home-1")
+    c = TestClient(app)
+    assert "const TELEOP = true" in c.get("/").text
+    assert c.post("/api/start", json={}).json()["ok"]
+    r.wait(lambda: r.ctrl.state == ctl.DRIVING, "DRIVING")
+
+    def joystick(v, w, seconds, until=None):
+        t_end = time.monotonic() + seconds
+        while time.monotonic() < t_end and not (until and until()):
+            assert c.post("/api/teleop", json={"v": v, "w": w}).json()["ok"]
+            time.sleep(0.1)
+
+    time.sleep(0.5)
+    assert not r.moving()  # no request yet
+    joystick(0.15, 0.0, 1.5)
+    world.advance()
+    assert world.x > 0.1 and world.v == pytest.approx(0.15)
+    r.wait(lambda: not r.moving(), "the operator's dead-man", 2.0)  # thumb up: no more posts
+    assert r.ctrl.state == ctl.DRIVING  # not halted, just no request
+
+    def held():
+        s = c.get("/api/status").json()
+        return s["v_req"] == 0.15 and s["v_ok"] == 0.0 and not r.moving()
+
+    joystick(0.15, 0.0, 10.0, until=held)  # toward the box until the collision monitor holds it
+    assert held()
+    world.advance()
+    gap = BOX_AHEAD_X - world.x
+    sp = read(lambda: r.navs[-1].safety)
+    assert sp.radius + sp.margin < gap < 0.45, gap
+    theta = world.theta
+    joystick(0.0, 0.5, 1.0)  # a turn in place is not held
+    world.advance()
+    assert world.theta - theta > 0.2 and BOX_AHEAD_X - world.x == pytest.approx(gap, abs=0.01)
+    assert c.post("/api/stop", json={}).json()["ok"]
+    r.wait(lambda: r.ctrl.state == ctl.IDLE, "IDLE after STOP")
+    steps = r.end()
+    driven = [s for s in steps if s["run"] == "1"]
+    assert {s["state"] for s in driven} == {"TELEOP"} and world.min_clearance > sp.radius + sp.margin
+    meta = json.load(open(tmp_path / "meta.json"))
+    assert meta["session"] == "home-1" and meta["args"]["behaviour"] == "teleop"
 
 
 def at_rest(r, seconds=1.0):

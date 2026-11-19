@@ -81,11 +81,18 @@ class Explore:
 
 @dataclass(frozen=True)
 class Behaviour:
-    default: str      # "explore" (frontier exploration) or "forward" (straight, through the collision monitor)
+    default: str      # "explore" (frontier exploration), "forward" (straight, through the collision monitor) or
+    #                   "teleop" (driven from the phone page's joystick, through the collision monitor)
     forward_v: float  # m/s, the forward behaviour's request
     resume_n: int     # clear steps needed to move again after a stop (velocity smoother)
     resume_margin: float  # m, restart hysteresis: after a stop, a clear step must also fit with this much more
     #                       clearance than the collision monitor's margin (0 = none)
+
+
+@dataclass(frozen=True)
+class Teleop:
+    """The teleop behaviour (phone joystick)."""
+    timeout_s: float  # s, operator dead-man: no joystick update for this long -> request (0, 0)
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,7 @@ class Config:
     camera: CameraCfg
     explore: Explore
     behaviour: Behaviour
+    teleop: Teleop
     controller: ControllerCfg
     page: Page
     glance: Glance
@@ -146,14 +154,16 @@ class Config:
 
 
 _SECTIONS = {"robot": RobotCfg, "footprint": Footprint, "safety": Safety, "perception": Perception,
-             "camera": CameraCfg, "explore": Explore, "behaviour": Behaviour, "controller": ControllerCfg, "page": Page,
-             "glance": Glance}
+             "camera": CameraCfg, "explore": Explore, "behaviour": Behaviour, "teleop": Teleop,
+             "controller": ControllerCfg, "page": Page, "glance": Glance}
+BEHAVIOURS = ("explore", "forward", "teleop")
 _NUMBER = {"float": (int, float), "int": (int,), "str": (str,)}
 # Ranges: every number is finite and >= 0; these are > 0 (a zero would divide, never time out, or stop
 # nothing), and the page port is a port.
 _POSITIVE = {"safety": ("v_max", "decel", "step", "n_speeds"),
              "perception": ("stale_s", "imu_max_age_s", "near_k", "near_n"),
-             "camera": ("body_z",), "explore": ("spin_w_min",), "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
+             "camera": ("body_z",), "explore": ("spin_w_min",), "teleop": ("timeout_s",),
+             "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
              "page": ("port",), "glance": ("n_frames",)}
 
 
@@ -203,8 +213,8 @@ def load(path):
         parts = {name: _section(name, cls, raw[name]) for name, cls in _SECTIONS.items()}
     except ValueError as e:
         raise ValueError(f"{path}: {e}") from None
-    if parts["behaviour"].default not in ("explore", "forward"):
-        raise ValueError(f"{path}: [behaviour] default must be 'explore' or 'forward'")
+    if parts["behaviour"].default not in BEHAVIOURS:
+        raise ValueError(f"{path}: [behaviour] default must be 'explore', 'forward' or 'teleop'")
     adapter = dict(raw.get("adapter", {}))
     folder = os.path.dirname(os.path.abspath(path))
     for key in adapter.get("paths", []):  # files of the adapter, relative to the config file

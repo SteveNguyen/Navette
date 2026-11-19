@@ -50,9 +50,11 @@ def make_run(d, base=True, fifo=False, fallback_t=None, steps=None, args=None):
                                     "accelerometer": [0, 9.81 * np.sin(tilt), 9.81 * np.cos(tilt)],
                                     "gyroscope": [0, 0, 0], "quaternion": [1, 0, 0, 0]}) + "\n")
     if steps is not None:
+        req = any(len(v) > 3 for v in steps.values())  # (run, v_prev, state, v_req, w_req): with the request
         with open(d / "steps.csv", "w") as f:
-            f.write("frame,run,v_prev,state\n"
-                    + "".join(f"{k},{v[0]},{v[1]},{v[2] if len(v) > 2 else 'DRIVE'}\n" for k, v in steps.items()))
+            f.write("frame,run,v_prev,state" + (",v_req,w_req" if req else "") + "\n"
+                    + "".join(f"{k},{v[0]},{v[1]},{v[2] if len(v) > 2 else 'DRIVE'}"
+                              + (f",{v[3]},{v[4]}" if req else "") + "\n" for k, v in steps.items()))
     if fifo:
         with open(d / "imu_fifo.jsonl", "w") as f:
             f.write(json.dumps({"header": True, "gyro_lsb_per_dps": 65.536, "acc_lsb_per_g": 10920,
@@ -166,6 +168,22 @@ def test_replay_uses_the_runs_own_behaviour_and_dry_run(tmp_path):
     navs = []
     replay(tmp_path / "b", navs=navs, args={"behaviour": "v3", "base": "ble"})
     assert navs[0][1:] == ("explore", 0.15, True)
+
+
+def test_replay_of_a_teleop_run_gives_the_operators_requests(tmp_path):
+    """A teleop run: each step gets the request the robot's navigator took (steps.csv v_req, w_req), set at the
+    frame's time; other behaviours get none."""
+    navs = []
+    steps = {k: (0, 0.0, "TELEOP", 0.01 * k, -0.02 * k) for k in range(10)}
+    replay(tmp_path, navs=navs, steps=steps, args={"behaviour": "teleop", "forward_v": 0.15})
+    nav = navs[0][0]
+    assert navs[0][1] == "teleop" and len(nav.steps) == 10
+    assert np.array([r[:2] for r in nav.requests]) == pytest.approx(np.array([[0.01 * k, -0.02 * k]
+                                                                              for k in range(10)]))
+    assert [r[2] for r in nav.requests] == pytest.approx([s[0] for s in nav.steps])
+    navs = []
+    replay(tmp_path / "b", navs=navs, steps=steps)
+    assert navs[0][0].requests == []
 
 
 def test_replay_switches_to_the_daemon_imu_where_the_robot_did(tmp_path):

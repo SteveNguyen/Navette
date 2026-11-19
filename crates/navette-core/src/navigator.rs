@@ -9,8 +9,8 @@
 //! blind zone  OccupancyGrid::blind_known(pose, scan): which image-bottom obstacles the map explains,
 //!              asked BEFORE this frame goes in (the scan must not explain itself)
 //! map          OccupancyGrid::update(t, pose, scan, sigma, cam_h, trusted range)    (keyframes only)
-//! behaviour    FrontierExplore::step(t, pose, scan, grid, v_prev), or the constant forward request
-//!              -> requested (v, w)
+//! behaviour    FrontierExplore::step(t, pose, scan, grid, v_prev), or the constant forward request, or the
+//!              operator's (teleop, set_request; (0, 0) once older than teleop_timeout_s) -> requested (v, w)
 //! safety       safe_command(v, w, scan, params, grid obstacles, blind_known)
 //! resume gate  ResumeGate::step(v_req, v_ok)                                        -> (v, w) to send
 //!              (while stopped, with resume_margin > 0: v_ok of safe_command with margin + resume_margin)
@@ -71,6 +71,11 @@ pub enum Behaviour {
     Explore,
     /// A constant straight request (`forward_v`) through the collision monitor: dry runs, stop tests.
     Forward,
+    /// The operator's request ([`Navigator::set_request`]) through the collision monitor, the resume gate and
+    /// every watchdog downstream, as a planner's would go: driving by hand (phone joystick). The map is kept as
+    /// with Forward (with odometry), for the collision monitor's near rule and the logs. Operator dead-man: a
+    /// request older than `teleop_timeout_s` (or none yet) is (0, 0).
+    Teleop,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,7 +83,7 @@ pub struct NavigatorParams {
     pub safety: SafetyParams,
     pub behaviour: Behaviour,
     /// False when the pose does not move with the robot (no base, a carried dry run): the map would smear,
-    /// so `Forward` then uses each frame's scan alone. `Explore` always uses the map.
+    /// so `Forward` and `Teleop` then use each frame's scan alone. `Explore` always uses the map.
     pub odometry: bool,
     /// Steps allowing forward motion needed to resume after a stop (velocity_smoother).
     pub resume_n: u32,
@@ -94,6 +99,9 @@ pub struct NavigatorParams {
     /// `near_n` scans, this one included. 1 <= near_k <= near_n; near_k = 1: no filter (the prototype).
     pub near_k: u32,
     pub near_n: u32,
+    /// Teleop: the operator's request holds this long (s) after it was set, measured on the step's `t`; then
+    /// (0, 0) until the next one.
+    pub teleop_timeout_s: f64,
     pub grid: OccupancyGridParams,
     pub frontier: FrontierParams,
     pub explore: ExploreParams,
@@ -112,6 +120,7 @@ impl Default for NavigatorParams {
             forward_v: 0.15,
             near_k: 1,
             near_n: 1,
+            teleop_timeout_s: 0.5,
             grid: OccupancyGridParams::default(),
             frontier: FrontierParams::default(),
             explore: ExploreParams {
@@ -124,8 +133,8 @@ impl Default for NavigatorParams {
 }
 
 impl NavigatorParams {
-    /// The parameters of every part, finite forward_v, finite resume_margin >= 0, 1 <= near_k <= near_n and
-    /// the tilt trust parameters.
+    /// The parameters of every part, finite forward_v, finite resume_margin >= 0, 1 <= near_k <= near_n,
+    /// finite teleop_timeout_s > 0 and the tilt trust parameters.
     pub fn validate(&self) -> Result<(), ParamError> {
         self.safety.validate()?;
         self.grid.validate()?;
@@ -139,6 +148,7 @@ impl NavigatorParams {
                 self.near_k, self.near_n
             )));
         }
+        params::positive("NavigatorParams.teleop_timeout_s", self.teleop_timeout_s)?;
         let t = &self.tilt_trust;
         params::non_negative("TiltTrust.s0", t.s0)?;
         params::positive("TiltTrust.tau_s", t.tau_s)?;
@@ -249,7 +259,7 @@ fn near_around(near: &[bool], bearing_deg: f64) -> bool {
 
 pub struct Navigator {
     params: NavigatorParams,
-    /// The map is used: always by Explore, by Forward only with odometry.
+    /// The map is used: always by Explore, by Forward and Teleop only with odometry.
     use_map: bool,
     grid: OccupancyGrid,
     explore: FrontierExplore,
@@ -258,6 +268,8 @@ pub struct Navigator {
     near_filter: NearFilter,
     /// The near flags the last step used (after the near filter).
     near: Vec<bool>,
+    /// Teleop: the operator's last request (v, w, t set).
+    request: Option<(f64, f64, f64)>,
     /// Forward: the heading to hold (the pose's theta at the first step).
     heading0: Option<f64>,
     /// Since when (s) the behaviour has been Done.
@@ -276,10 +288,22 @@ impl Navigator {
             gate: ResumeGate::new(params.resume_n),
             near_filter: NearFilter::new(params.near_k, params.near_n),
             near: Vec::new(),
+            request: None,
             heading0: None,
             done_since: None,
             params,
         })
+    }
+
+    /// Teleop: the operator's request (m/s, rad/s > 0 counter-clockwise), set at time `t` (s, the clock of
+    /// the steps' `t`). Each step takes the last one, through the collision monitor and the resume gate, until
+    /// it is older than `teleop_timeout_s`. A non-finite value is taken as (0, 0). Other behaviours ignore it.
+    pub fn set_request(&mut self, v: f64, w: f64, t: f64) {
+        self.request = Some(if v.is_finite() && w.is_finite() {
+            (v, w, t)
+        } else {
+            (0.0, 0.0, t)
+        });
     }
 
     /// The near flags of the last step's scan after the near filter (what every part of the step used);
@@ -331,6 +355,7 @@ impl Navigator {
         self.gate = ResumeGate::new(p.resume_n);
         self.near_filter.reset();
         self.near.clear();
+        self.request = None;
         (self.heading0, self.done_since) = (None, None);
     }
 
@@ -386,6 +411,11 @@ impl Navigator {
                 let w_hold = (-HEADING_K * err).clamp(-HEADING_W_MAX, HEADING_W_MAX);
                 (self.params.forward_v, w_hold, State::Forward)
             }
+            Behaviour::Teleop => match self.request {
+                // a NaN t (never) is stale; a request set after this frame's capture (t_set > t) is current
+                Some((v, w, t_set)) if t - t_set <= self.params.teleop_timeout_s => (v, w, State::Teleop),
+                _ => (0.0, 0.0, State::Teleop),
+            },
             Behaviour::Explore => {
                 let (v_req, w_req) =
                     self.explore
@@ -971,6 +1001,79 @@ mod tests {
             };
             let err = Navigator::new(p).err().unwrap().0;
             assert!(err.starts_with("NavigatorParams.near_k"), "{err}");
+        }
+    }
+
+    fn teleop(odometry: bool) -> Navigator {
+        Navigator::new(NavigatorParams {
+            behaviour: Behaviour::Teleop,
+            odometry,
+            resume_n: 1,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn teleop_request_goes_through_the_collision_monitor() {
+        for odometry in [true, false] {
+            let mut nav = teleop(odometry);
+            let near = Pose2::new(4.0 - 0.13 - 0.05, 1.5, 0.0); // 5 cm from the wall, facing it
+            let far = Pose2::new(1.0, 1.5, 0.0);
+            nav.set_request(0.15, 0.2, 0.0);
+            let out = step(&mut nav, 0.0, near, near);
+            assert_eq!(
+                (out.v, out.v_req, out.w_req, out.state),
+                (0.0, 0.15, 0.2, State::Teleop)
+            );
+            assert_eq!(out.w, 0.2); // a turn is not held (no forward motion)
+            let out = step(&mut nav, 0.1, far, far);
+            assert!(out.v > 0.1 && out.w == 0.2 && !out.finished);
+            // reverse: capped at reverse_max (0: the camera only looks forward)
+            nav.set_request(-0.1, 0.0, 0.1);
+            assert_eq!(step(&mut nav, 0.2, far, far).v, 0.0);
+            assert_eq!(nav.grid().keyframes().is_empty(), !odometry); // the map with odometry, as Forward
+        }
+    }
+
+    #[test]
+    fn teleop_operator_dead_man() {
+        let mut nav = teleop(true);
+        let far = Pose2::new(1.0, 1.5, 0.0);
+        // no request yet: still
+        let out = step(&mut nav, 0.0, far, far);
+        assert_eq!((out.v, out.w, out.v_req, out.w_req), (0.0, 0.0, 0.0, 0.0));
+        nav.set_request(0.15, -0.1, 1.0);
+        let out = step(&mut nav, 0.9, far, far); // set after this frame's capture: current
+        assert_eq!((out.v_req, out.w_req), (0.15, -0.1));
+        assert_eq!(step(&mut nav, 1.5, far, far).v_req, 0.15); // 0.5 s old: still held
+        let out = step(&mut nav, 1.51, far, far); // older than teleop_timeout_s: (0, 0)
+        assert_eq!((out.v, out.w, out.v_req, out.w_req), (0.0, 0.0, 0.0, 0.0));
+        // a new request goes again; a non-finite one is (0, 0)
+        nav.set_request(0.1, 0.0, 2.0);
+        assert_eq!(step(&mut nav, 2.0, far, far).v_req, 0.1);
+        nav.set_request(f64::NAN, 0.3, 2.1);
+        let out = step(&mut nav, 2.1, far, far);
+        assert_eq!((out.v_req, out.w_req), (0.0, 0.0));
+        // reset forgets it
+        nav.set_request(0.1, 0.0, 3.0);
+        nav.reset();
+        assert_eq!(step(&mut nav, 3.0, far, far).v_req, 0.0);
+        // other behaviours ignore it
+        let mut fwd = forward(true, 1, 0.15);
+        fwd.set_request(0.3, 0.3, 0.0);
+        assert_eq!(step(&mut fwd, 0.0, far, far).v_req, 0.15);
+    }
+
+    #[test]
+    fn teleop_timeout_must_be_positive() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let p = NavigatorParams {
+                teleop_timeout_s: bad,
+                ..Default::default()
+            };
+            let err = Navigator::new(p).err().unwrap().0;
+            assert!(err.starts_with("NavigatorParams.teleop_timeout_s"), "{err}");
         }
     }
 

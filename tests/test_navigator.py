@@ -236,6 +236,31 @@ def test_near_persistence():
             Navigator(near_k=k, near_n=n)
 
 
+def test_teleop_request_through_the_collision_monitor_and_operator_timeout():
+    nav = Navigator(behaviour="teleop", resume_n=1)
+    assert (nav.behaviour, nav.teleop_timeout_s) == ("teleop", 0.5)
+    assert Navigator(behaviour="teleop", teleop_timeout_s=0.3).teleop_timeout_s == 0.3
+    near_wall, far = (4.0 - 0.18, 1.5, 0.0), (1.0, 1.5, 0.0)
+
+    def step(t, pose):
+        return nav.step(t, 0.1, pose, room_scan(pose), 0.35, 0.0, 0.0, 0.0, 0.0)
+
+    out = step(0.0, far)  # no request yet
+    assert (out.v, out.w, out.v_req, out.state) == (0.0, 0.0, 0.0, "TELEOP")
+    nav.set_request(0.15, 0.1, 0.0)
+    out = step(0.1, near_wall)  # a wall ahead: held, the turn goes
+    assert (out.v, out.v_req, out.w) == (0.0, 0.15, 0.1)
+    out = step(0.2, far)
+    assert out.v > 0.1 and out.w == 0.1
+    assert step(0.6, far).v_req == 0.0  # the operator's dead-man: 0.6 s after the request
+    nav.set_request(-0.1, 0.0, 0.7)
+    assert step(0.7, far).v == 0.0  # no reverse (reverse_max 0)
+    with pytest.raises(ValueError, match="teleop_timeout_s"):
+        Navigator(teleop_timeout_s=0.0)
+    with pytest.raises(ValueError, match="'teleop'"):
+        Navigator(behaviour="joystick")
+
+
 def test_nav_out_is_dataclass_like():
     out = NavOut(0.1, 0.2, 0.3, 0.4, "DRIVE", False)
     assert (out.v, out.w, out.v_req, out.w_req, out.state, out.finished, out.blind_stop) == (

@@ -110,6 +110,12 @@ forward_v = 0.15
 resume_n = 4
 resume_margin = 0.10
 
+[teleop]
+# Driving from the phone page's joystick (--behaviour teleop), through the collision monitor and every watchdog.
+# The page sends at ~10 Hz while the thumb is down; this long without an update (a WiFi hiccup, the page in the
+# background) and the request is (0, 0). 0.5 s = 5 missed updates, as the base's own dead-man.
+timeout_s = 0.5
+
 [controller]
 v_max = 0.15           # cap after the collision monitor
 w_max = 0.5

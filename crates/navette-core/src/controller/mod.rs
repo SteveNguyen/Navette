@@ -16,6 +16,8 @@ pub enum State {
     Done,
     /// The constant straight request of the 'forward' behaviour.
     Forward,
+    /// The operator's request of the 'teleop' behaviour.
+    Teleop,
 }
 
 impl State {
@@ -27,6 +29,7 @@ impl State {
             State::Look => "LOOK",
             State::Done => "DONE",
             State::Forward => "FORWARD",
+            State::Teleop => "TELEOP",
         }
     }
 }

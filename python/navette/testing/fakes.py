@@ -281,6 +281,10 @@ class FakeNavigator:
     def __init__(self, odometry=True, v=0.1, stop_m=0.6):
         self.odometry, self.v, self.stop_m = odometry, v, stop_m
         self.steps, self.observed = [], []  # (t, dt, pose, scan, cam_h, a, v, w, v_prev), (t, pose, scan, cam_h)
+        self.requests = []  # set_request calls: (v, w, t)
+
+    def set_request(self, v, w, t):
+        self.requests.append((v, w, t))
 
     def step(self, t, dt, pose, scan, cam_h, a, v, w, v_prev):
         self.steps.append((t, dt, pose, scan, cam_h, a, v, w, v_prev))

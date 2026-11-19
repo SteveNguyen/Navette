@@ -8,8 +8,9 @@ read from the run folder instead of the devices. A recorded robot differs from a
     first perception.up_g_s of samples, as on the robot).
 
 A robot run's steps.csv is followed: only the frames it stepped, a fresh navigator at each START (its `run`
-column), its v_prev (the command actually sent), its head-glance frames into the map only. Without one, every
-frame is stepped and v_prev is the previous step's output. Behaviour, forward speed and dry run come from the
+column), its v_prev (the command actually sent), its head-glance frames into the map only, and in a teleop run
+its request (v_req, w_req: the operator's, as the robot's navigator took it). Without one, every frame is
+stepped and v_prev is the previous step's output (a teleop run then gets no request: (0, 0)). Behaviour, forward speed and dry run come from the
 run's meta.json ("args"), else from the arguments.
 
 Output folder: steps.csv (STEP_COLS; timings are this machine's) and, with OpenCV and frames that carry a
@@ -30,8 +31,8 @@ from navette.runtime.up import LiveUp
 
 
 def robot_steps(run_dir):
-    """A robot run's steps.csv -> {frame: (navigator run id, v_prev the robot passed, state)}, or None (not a
-    robot run)."""
+    """A robot run's steps.csv -> {frame: (navigator run id, v_prev the robot passed, state, (v_req, w_req))},
+    or None (not a robot run)."""
     path = os.path.join(run_dir, "steps.csv")
     if not os.path.exists(path):
         return None
@@ -39,7 +40,8 @@ def robot_steps(run_dir):
         rows = list(csv.DictReader(f))
     if not rows or "run" not in rows[0]:
         return None
-    return {int(r["frame"]): (int(r["run"]), float(r["v_prev"]), r.get("state", "")) for r in rows}
+    return {int(r["frame"]): (int(r["run"]), float(r["v_prev"]), r.get("state", ""),
+                              (float(r.get("v_req") or 0.0), float(r.get("w_req") or 0.0))) for r in rows}
 
 
 def run_args(run_dir):
@@ -108,6 +110,8 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
             continue
         dt = 0.1 if t_prev is None else t - t_prev
         a, v, w = motion.update(odom, dt) if base is not None and base.balancing else (0.0, 0.0, 0.0)
+        if behaviour == "teleop" and follow is not None:  # the operator's request as the robot's navigator took it
+            nav.set_request(*follow[idx][3], t)
         out = nav.step(t, dt, pose, scan, cam_h, a, v, w, v_prev)
         c3 = time.perf_counter()
         t_prev, v_prev = t, out.v  # (a robot run overrides v_prev from its steps.csv)

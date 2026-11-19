@@ -158,6 +158,11 @@ inputs the prototype handled unsafely, and on purpose:
   On the robot the floor model is bi-stable on a doormat and makes single-frame false patches near an open
   door, which stopped or blocked the robot. Cost: k - 1 frames of delay on a real obstacle filling the image
   bottom (one frame, ~0.12 s, <= 2 cm at 0.15 m/s with 2 of 3), inside the margin.
+- **Teleop behaviour** (`navigator.rs`, `Behaviour::Teleop`; new, the prototype had none): the request is the
+  operator's (`Navigator::set_request`, the phone page's joystick through the runtime), and goes through the
+  collision monitor, the resume gate, the controller's caps and every watchdog like a planner's; (0, 0) once
+  older than `teleop_timeout_s` (operator dead-man; the reference robot: 0.5 s, `[teleop]`). The map is kept
+  as with `forward` (with odometry). The other behaviours are unchanged.
 - **Exploration behaviour switches** (`ExploreParams`, `[explore]` in the robot config; each off by default so
   the goldens are unchanged, the reference robot turns them on). Measured on a 4-minute exploration of the
   reference robot: 54 % of the time turning in place, ~16 turn reversals, 15 blocks of which 14 came from the

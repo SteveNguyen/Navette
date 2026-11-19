@@ -111,6 +111,21 @@ PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
 - The robot halts by itself if the page stops polling for 2 s, if perception goes stale, or on a base fault.
 - `--behaviour forward`: straight ahead through the collision monitor. `--dry-run`: everything runs, nothing is
   sent to the base. `--no-base`: no base at all (head and camera only).
+- **Driving by hand (recording sessions)**: `--behaviour teleop --session <name>`, e.g.
+
+  ```bash
+  PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
+      --robot ~/navette/robot/reachy_poussah.toml --out ~/navette/runs --behaviour teleop --session alice-flat-1
+  ```
+
+  The page then shows a joystick under START / STOP: press START, then one thumb on the disk, up = forward,
+  sideways = turn; lift it and the robot stops (it also stops by itself 0.5 s after the last joystick update,
+  `[teleop] timeout_s`). The speed is capped as in exploration (0.15 m/s, 0.5 rad/s) and there is no reverse (the
+  camera only looks forward): turn round instead. The requests still go through the collision monitor: under the
+  joystick, "joystick" is what you ask, "allowed" what the robot may do, **HELD** when it holds you before an
+  obstacle (turn away). Every watchdog stays on (silent page, stale perception, base fault). The session name
+  (lower case letters, digits, `_` and `-`, up to 32 characters, starting with a letter or digit) goes into the
+  run's `meta.json` (`"session"`) for the dataset import.
 - Ctrl-C ends the program (the base is stopped and sat down). If the ssh session drops, the program ends too and
   the base's own dead-man stops it; to run independently of the ssh session, start it with `setsid -f` and a log
   file.

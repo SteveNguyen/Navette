@@ -25,7 +25,7 @@ fn pose2(p: [f64; 3]) -> Pose2 {
 ///   v, w          what to send: m/s and rad/s (> 0 counter-clockwise), after the collision monitor and the
 ///                 resume gate
 ///   v_req, w_req  what the behaviour asked for
-///   state         the behaviour's state: "DRIVE", "SPIN", "LOOK", "DONE" or "FORWARD"
+///   state         the behaviour's state: "DRIVE", "SPIN", "LOOK", "DONE", "FORWARD" or "TELEOP"
 ///   finished      exploration is over: DONE for 3 s
 ///   blind_stop    forward motion is stopped only by the never-seen blind zone below the image (a look down
 ///                 at it, Navigator.observe, would help)
@@ -89,9 +89,11 @@ impl PyNavOut {
 /// core module's documentation).
 ///   safety      SafetyParams (default: SafetyParams())
 ///   behaviour   "explore": frontier exploration; "forward": a constant straight request of forward_v (m/s)
-///               through the collision monitor (dry runs, stop tests)
+///               through the collision monitor (dry runs, stop tests); "teleop": the operator's request
+///               (set_request) through the collision monitor and the resume gate
 ///   odometry    False when the pose does not move with the robot (no base, a carried dry run): the map
-///               would smear, so "forward" then uses each frame's scan alone ("explore" always uses the map)
+///               would smear, so "forward" and "teleop" then use each frame's scan alone ("explore" always
+///               uses the map)
 ///   resume_n    steps allowing forward motion needed to resume after a stop
 ///   grid        the OccupancyGrid to map into (default: OccupancyGrid()); it is the `grid` attribute
 ///   frontier    FrontierParams (default: FrontierParams())
@@ -102,10 +104,11 @@ impl PyNavOut {
 ///               margin); 0 = none
 ///   near_k, near_n  near persistence: a sector is near only if near in at least near_k of the last near_n
 ///               scans (bearings compared in the fixed frame); 1 of 1 = no filter
+///   teleop_timeout_s  s, teleop: the operator's request holds this long after it was set; then (0, 0)
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
 /// centres, path and target in the fixed frame, for display; near: the near flags the last step used (after
 /// the near filter; empty before the first step); safety, behaviour, odometry, resume_n, forward_v,
-/// resume_margin, near_k, near_n as given; blocks: recovery turns started so far.
+/// resume_margin, near_k, near_n, teleop_timeout_s as given; blocks: recovery turns started so far.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
 /// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
@@ -145,7 +148,8 @@ fn core_scan(py: Python<'_>, scan: &PyScan) -> PyResult<Scan> {
 impl PyNavigator {
     #[new]
     #[pyo3(signature = (safety=None, behaviour="explore", odometry=true, resume_n=2, forward_v=0.15, grid=None,
-                        frontier=None, explore=None, tilt_trust=None, resume_margin=0.0, near_k=1, near_n=1))]
+                        frontier=None, explore=None, tilt_trust=None, resume_margin=0.0, near_k=1, near_n=1,
+                        teleop_timeout_s=0.5))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -161,13 +165,15 @@ impl PyNavigator {
         resume_margin: f64,
         near_k: u32,
         near_n: u32,
+        teleop_timeout_s: f64,
     ) -> PyResult<Self> {
         let behaviour = match behaviour {
             "explore" => Behaviour::Explore,
             "forward" => Behaviour::Forward,
+            "teleop" => Behaviour::Teleop,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "behaviour must be 'explore' or 'forward', got {other:?}"
+                    "behaviour must be 'explore', 'forward' or 'teleop', got {other:?}"
                 )))
             }
         };
@@ -191,6 +197,7 @@ impl PyNavigator {
             forward_v,
             near_k,
             near_n,
+            teleop_timeout_s,
             // the navigator's own grid only stands in for the Python object's between calls: one cell
             grid: OccupancyGridParams {
                 size_m: grid_params.res,
@@ -243,7 +250,20 @@ impl PyNavigator {
         match self.inner.params().behaviour {
             Behaviour::Explore => "explore",
             Behaviour::Forward => "forward",
+            Behaviour::Teleop => "teleop",
         }
+    }
+
+    #[getter]
+    fn teleop_timeout_s(&self) -> f64 {
+        self.inner.params().teleop_timeout_s
+    }
+
+    /// Teleop: the operator's request, v (m/s) and w (rad/s, > 0 counter-clockwise), set at time t (s, the
+    /// clock of step's t). Steps take the last one until it is older than teleop_timeout_s, then (0, 0); a
+    /// non-finite value is taken as (0, 0). Other behaviours ignore it. Same thread as step (see Threads).
+    fn set_request(&mut self, v: f64, w: f64, t: f64) {
+        self.inner.set_request(v, w, t);
     }
 
     #[getter]

@@ -9,8 +9,9 @@ One process owns everything. Threads:
   + the adapter's own threads (base link, IMU reader, stop button...)
 
 Run folder (written here; the adapter adds its own recordings next to them, see its module):
-  meta.json      clock, config, "args" (behaviour, forward_v, dry_run, base: whether there is one), "robot"
-                 (the adapter's data, refreshed at the end), frames (count)
+  meta.json      clock, config, "args" (behaviour, forward_v, dry_run, base: whether there is one), "session"
+                 (the recording session's name, or null), "robot" (the adapter's data, refreshed at the end),
+                 frames (count)
   steps.csv      one row per navigation step, STEP_COLS + LIVE_COLS (a replay follows frame, run, v_prev, state)
   commands.csv   every call the controller made to the base (or would have: no base / dry run)
 """
@@ -127,15 +128,39 @@ def step_row(t_rel, idx, pose, cam_h, pitch, out, ms):
 
 
 class Status:
-    """What the perception loop shows on the page (written by one thread, read by the page: plain attributes)."""
+    """What the perception loop shows on the page (written by one thread, read by the page: plain attributes).
+    v_req, w_req: what the behaviour asked for at the last step (teleop: the joystick as the navigator took it);
+    v_ok, w_ok: what the collision monitor and the resume gate allowed of it (before the controller's caps)."""
 
-    def __init__(self):
+    def __init__(self, behaviour=""):
         self.hz, self.frames, self.imu, self.cam_h, self.pitch = 0.0, 0, "", None, None
         self.nav_state, self.preview, self.message = "", None, "starting"
+        self.behaviour, self.v_req, self.w_req, self.v_ok, self.w_ok = behaviour, 0.0, 0.0, 0.0, 0.0
 
     def snapshot(self):
         return {"hz": round(self.hz, 1), "frames": self.frames, "imu": self.imu, "nav_state": self.nav_state,
-                "cam_h": self.cam_h, "pitch": self.pitch, "message": self.message}
+                "cam_h": self.cam_h, "pitch": self.pitch, "message": self.message, "behaviour": self.behaviour,
+                "v_req": round(self.v_req, 3), "w_req": round(self.w_req, 3), "v_ok": round(self.v_ok, 3),
+                "w_ok": round(self.w_ok, 3)}
+
+
+class Joystick:
+    """The operator's request of the teleop behaviour: set by the page (POST /api/teleop, any thread), read by
+    the perception loop, which hands it to its navigator (Navigator.set_request) before each step: the
+    navigator is used by one thread only. The navigator applies the operator's dead-man (teleop.timeout_s) on
+    the time of the last set, on the clock of the frames (time.monotonic)."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock, self._lock, self._req = clock, threading.Lock(), None
+
+    def set(self, v, w):
+        with self._lock:
+            self._req = (float(v), float(w), self.clock())
+
+    def get(self):
+        """(v, w, t of the set), or None before the first one."""
+        with self._lock:
+            return self._req
 
 
 MOVING_V = 0.05  # m/s: applied speed from which the arc controller counts the robot as moving (its default)
@@ -173,15 +198,16 @@ def navigator_params(cfg):
 
 def new_navigator(cfg, behaviour, forward_v, odometry):
     """A navette.Navigator for a robot config (navigator_params) with its resume gate (resume_n, and the
-    restart hysteresis resume_margin) and its near persistence (perception.near_k of near_n). The single place
-    where the runtime builds one."""
+    restart hysteresis resume_margin), its near persistence (perception.near_k of near_n) and the teleop
+    operator's dead-man (teleop.timeout_s). The single place where the runtime builds one."""
     import navette
 
     p = navigator_params(cfg)
     return navette.Navigator(p["safety"], behaviour=behaviour, odometry=odometry, resume_n=cfg.behaviour.resume_n,
                              forward_v=forward_v, grid=navette.OccupancyGrid(**p["grid"]), frontier=p["frontier"],
                              explore=p["explore"], resume_margin=cfg.behaviour.resume_margin,
-                             near_k=cfg.perception.near_k, near_n=cfg.perception.near_n)
+                             near_k=cfg.perception.near_k, near_n=cfg.perception.near_n,
+                             teleop_timeout_s=cfg.teleop.timeout_s)
 
 
 def default_navigator(cfg, behaviour, forward_v):
@@ -208,23 +234,31 @@ def write_meta(out_dir, meta):
 
 
 def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_up_filter, behaviour=None,
-        forward_v=None, dry_run=False, web_app=None, on_controller=None, log=print):
+        forward_v=None, dry_run=False, web_app=None, on_controller=None, log=print, session=None, on_joystick=None):
     """The robot loop until stop_event.
 
     robot: navette.interfaces.Robot (already open). out_dir: the run folder (exists).
     make_navigator(odometry: bool) -> a navette.Navigator (step, observe, grid); a new one at every START.
-    behaviour, forward_v: only recorded in meta.json (the replay reads them); make_navigator carries them.
+    behaviour, forward_v: recorded in meta.json (the replay reads them); make_navigator carries them. behaviour
+    "teleop": a Joystick takes the operator's request (the page's POST /api/teleop), given to the navigator
+    before each step (Navigator.set_request).
     web_app: a FastAPI app to add the page routes to (served by the caller), or None.
-    on_controller(ctrl): called once the Controller exists (other START / STOP sources)."""
+    on_controller(ctrl): called once the Controller exists (other START / STOP sources); on_joystick(joystick):
+    likewise for the teleop Joystick (other request sources, tests).
+    session: a recording session's name, stored in meta.json ("session") for the dataset import."""
     camera, imu, base = robot.camera, robot.imu, robot.base
     fs = free_space(camera)
+    behaviour = behaviour or cfg.behaviour.default
     meta = {"clock": "time.monotonic", "started_wall": datetime.now().isoformat(), "config": cfg.as_dict(),
-            "args": {"behaviour": behaviour or cfg.behaviour.default,
+            "args": {"behaviour": behaviour,
                      "forward_v": cfg.behaviour.forward_v if forward_v is None else forward_v,
                      "dry_run": dry_run, "base": base is not None},
-            "robot": robot.meta()}
+            "session": session, "robot": robot.meta()}
     write_meta(out_dir, meta)
-    status = Status()
+    status = Status(behaviour)
+    joystick = Joystick() if behaviour == "teleop" else None
+    if joystick is not None and on_joystick is not None:
+        on_joystick(joystick)
     threads_stop = threading.Event()
     files, ctrl, n_steps = [], None, 0
     try:
@@ -248,7 +282,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
         if web_app is not None:
             from navette.runtime.page import add_routes
 
-            add_routes(web_app, ctrl, status, cfg.page.timeout_s, cfg.page.preview_s)
+            add_routes(web_app, ctrl, status, cfg.page.timeout_s, cfg.page.preview_s, joystick)
 
         steps_f = open(os.path.join(out_dir, "steps.csv"), "w", newline="", buffering=1)
         files.append(steps_f)
@@ -347,6 +381,9 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
             # the measured motion matters to a balancing base only (it pitches when it accelerates)
             a, v, w = motion.update(odom, dt) if base is not None and base.balancing else (0.0, 0.0, 0.0)
             v_prev = ctrl.sent[0]
+            req = joystick.get() if joystick is not None else None
+            if req is not None:  # teleop: the operator's last request, aged by the navigator
+                nav.set_request(*req)
             out = nav.step(t, dt, pose, scan, cam_h, a, v, w, v_prev)
             c3 = time.perf_counter()
             # age measured from the frame's capture; outputs of a navigator from before a START that happened
@@ -366,6 +403,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
                 status.hz = 0.9 * status.hz + 0.1 / (t - t_prev)
             t_prev = t
             status.nav_state = out.state
+            status.v_req, status.w_req, status.v_ok, status.w_ok = out.v_req, out.w_req, out.v, out.w
             status.cam_h, status.pitch = round(cam_h, 3), round(pitch, 1)
             status.message = "DRY RUN" if dry_run else ""
             preview_ms = 0.0

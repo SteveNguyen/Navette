@@ -38,6 +38,7 @@ def test_reachy_poussah_values():
     assert (cfg.explore.recover_replan, cfg.explore.recover_hold_s) == (False, 0.0)  # C off: unproven
     # near persistence: the floor model's single-frame flicker at the image bottom (the core's default: 1 of 1)
     assert (cfg.perception.near_k, cfg.perception.near_n) == (2, 3)
+    assert cfg.teleop.timeout_s == 0.5  # operator dead-man of the phone joystick
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -77,7 +78,11 @@ def edited(tmp_path, old, new, count=1):
     (r"^resume_n = 4$", "resume_n = 2.5", r"\[behaviour\] resume_n = 2.5: expected int"),
     (r"^resume_margin = 0.10$", "", r"\[behaviour\]: missing \['resume_margin'\]"),
     (r"^resume_margin = 0.10$", "resume_margin = \"0.1\"", r"\[behaviour\] resume_margin = '0.1': expected float"),
-    (r'^default = "explore"$', 'default = "v3"', r"'explore' or 'forward'"),
+    (r'^default = "explore"$', 'default = "v3"', r"'explore', 'forward' or 'teleop'"),
+    (r"^timeout_s = 0.5$", "", r"\[teleop\]: missing \['timeout_s'\]"),
+    (r"^timeout_s = 0.5$", "timeout_s = 0.0", r"\[teleop\] timeout_s = 0.0: must be finite and > 0"),
+    (r"^timeout_s = 0.5$", "timeout_s = nan", r"\[teleop\] timeout_s = nan"),
+    (r"^\[teleop\]$", "", r"missing tables \['teleop'\]"),
     (r"^\[page\]$", "[pages]", r"missing tables \['page'\]; unknown tables \['pages'\]"),
     (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = []", r"\[explore\] v_set = \[\]: expected a non-empty list"),
     (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = [0.1, 0.0]", r"\[explore\] v_set"),
@@ -125,6 +130,24 @@ def edited(tmp_path, old, new, count=1):
 def test_bad_config_is_an_error(tmp_path, old, new, message):
     with pytest.raises(ValueError, match=message):
         config.load(edited(tmp_path, old, new))
+
+
+def test_teleop_can_be_the_default_behaviour(tmp_path):
+    cfg = config.load(edited(tmp_path, r'^default = "explore"$', 'default = "teleop"'))
+    assert cfg.behaviour.default == "teleop"
+
+
+def test_cli_teleop_and_session():
+    parse = cli.build_parser().parse_args
+    args = parse(["--robot", "r.toml", "--out", "x", "--behaviour", "teleop", "--session", "home-1_a"])
+    assert (args.behaviour, args.session) == ("teleop", "home-1_a")
+    assert parse(["--robot", "r.toml", "--out", "x"]).session is None
+    assert parse(["--robot", "r.toml", "--out", "x", "--session", "a" * 32]).session == "a" * 32
+    for bad in ["", "Home", "-home", "_a", "a b", "a/b", "a" * 33, "é", "a.b"]:
+        with pytest.raises(SystemExit):
+            parse(["--robot", "r.toml", "--out", "x", "--session", bad])
+    with pytest.raises(SystemExit):
+        parse(["--robot", "r.toml", "--out", "x", "--behaviour", "joystick"])
 
 
 def test_ints_are_accepted_as_floats(tmp_path):
