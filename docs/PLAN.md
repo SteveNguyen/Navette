@@ -150,6 +150,14 @@ inputs the prototype handled unsafely, and on purpose:
   burst, and the stop-and-go at the edge of a blocked zone produces such bursts (the reference robot: 0.10 m,
   `resume_n` 4). Stops decided by the `near` rule (an obstacle off the image bottom that the map does not
   explain) do not depend on the margin, so the hysteresis does not change them.
+- **Exploration behaviour switches** (`ExploreParams`, `[explore]` in the robot config; each off by default so
+  the goldens are unchanged, the reference robot turns them on). Measured on a 4-minute exploration of the
+  reference robot: 54 % of the time turning in place, ~16 turn reversals, 15 blocks of which 14 came from the
+  current scan's `near` sectors.
+  - `near_known` (`controller/dwa.rs`): the arcs put a `near` obstacle at the clearance radius only where the
+    map does not explain it (`blind_known`, asked before the frame goes in), the collision monitor's own rule.
+    On 512 of the 1405 steps without an admissible arc, that rule allowed some. The collision monitor is
+    unchanged and stays the safety layer.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

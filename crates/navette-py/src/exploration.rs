@@ -3,7 +3,7 @@
 //! A pose is an (x, y, theta) sequence, points are (N, 2) arrays in the fixed frame, grids are 2-D arrays
 //! with [i, j] = the cell at x = x0 + i res, y = y0 + j res.
 
-use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -12,7 +12,7 @@ use navette_core::exploration::frontier::{self, FrontierParams, FrontierPlanner}
 use navette_core::exploration::frontier_explore::FrontierExplore;
 use navette_core::geometry::{Point2, Pose2};
 
-use crate::collision_monitor::{safety_params, PySafetyParams};
+use crate::collision_monitor::{safety_params, sector_mask, PySafetyParams};
 use crate::controller::{explore_params, PyExploreParams};
 use crate::convert::{param_err, rows_to_py};
 use crate::occupancy_grid::PyOccupancyGrid;
@@ -457,7 +457,10 @@ impl PyFrontierExplore {
     }
 
     /// Requested (v, w) at time t (s) from pose (x, y, theta). scan: this frame's Scan (None: the last one
-    /// is kept); grid: the OccupancyGrid; v_applied: the speed command sent last step (m/s).
+    /// is kept); grid: the OccupancyGrid; v_applied: the speed command sent last step (m/s); near_known:
+    /// per-sector bool of this scan, blind segment explained by the map (used with ExploreParams.near_known).
+    #[pyo3(signature = (t, pose, scan, grid, v_applied, near_known=None))]
+    #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
         py: Python<'_>,
@@ -466,10 +469,29 @@ impl PyFrontierExplore {
         scan: Option<PyRef<'_, PyScan>>,
         grid: PyRef<'_, PyOccupancyGrid>,
         v_applied: f64,
+        near_known: Option<PyReadonlyArray1<'_, bool>>,
     ) -> PyResult<(f64, f64)> {
         let scan = scan.map(|s| s.to_core(py)).transpose()?;
+        let near_known = match (&scan, near_known) {
+            (Some(s), mask) => sector_mask(mask, s.len(), "near_known")?,
+            (None, Some(_)) => {
+                return Err(PyValueError::new_err(
+                    "near_known is per sector of a scan: give the scan",
+                ))
+            }
+            (None, None) => None,
+        };
         let grid = &grid.inner;
-        Ok(self.with(py, |fe| fe.step(t, pose2(pose), scan.as_ref(), grid, v_applied)))
+        Ok(self.with(py, |fe| {
+            fe.step(
+                t,
+                pose2(pose),
+                scan.as_ref(),
+                grid,
+                v_applied,
+                near_known.as_deref(),
+            )
+        }))
     }
 }
 

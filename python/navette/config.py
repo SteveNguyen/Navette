@@ -60,6 +60,8 @@ class Explore:
     v_set: tuple  # m/s, candidate forward speeds. Those above safety.v_max are dropped (the collision monitor
     #               would cut them). controller.v_max is NOT applied here: the command is scaled down to it
     #               afterwards, so a candidate above it only says "as fast as allowed"
+    near_known: bool  # the arcs put an obstacle off the image bottom at the clearance radius only where the map
+    #                   does not explain it (the collision monitor's rule); false: everywhere (the core default)
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,10 @@ def _section(name, cls, raw):
             if not isinstance(v, list) or not v or not all(
                     isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0 for x in v):
                 raise ValueError(f"[{name}] {key} = {v!r}: expected a non-empty list of numbers > 0")
+            continue
+        if kind == "bool":  # a switch: true or false only
+            if not isinstance(v, bool):
+                raise ValueError(f"[{name}] {key} = {v!r}: expected bool")
             continue
         if isinstance(v, bool) or not isinstance(v, _NUMBER[kind]):
             raise ValueError(f"[{name}] {key} = {v!r}: expected {kind}")

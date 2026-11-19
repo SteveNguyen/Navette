@@ -20,6 +20,7 @@ import math
 import os
 import threading
 import time
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -155,16 +156,19 @@ def navigator_params(cfg):
                                      (the slowest candidate, or controller.v_max): a slow robot is not
                                      "blocked" for driving slowly
     The controller's cap (controller.v_max) is applied to the command afterwards (Controller, cap_speed), as
-    the Python prototype did: it does not remove candidates here."""
+    the Python prototype did: it does not remove candidates here.
+    The other [explore] keys (behaviour switches and timings: near_known, ...) are passed as they are, under
+    the same names: their core defaults reproduce the prototype, a robot's config may turn them on."""
     import navette
 
     radius, margin = cfg.footprint.radius, cfg.footprint.margin
     v_set = [v for v in cfg.explore.v_set if v <= cfg.safety.v_max] or [cfg.safety.v_max]
     moving_v = min(MOVING_V, 0.5 * min(min(v_set), cfg.controller.v_max))
+    switches = {f.name: getattr(cfg.explore, f.name) for f in dataclasses.fields(cfg.explore) if f.name != "v_set"}
     return {"safety": navette.SafetyParams(**cfg.safety_params()),
             "grid": {"robot_radius": radius},
             "frontier": navette.FrontierParams(clear=radius + margin, blind=cfg.camera.blind_m),
-            "explore": navette.ExploreParams(v_set=v_set, moving_v=moving_v, rotate_in_place=True)}
+            "explore": navette.ExploreParams(v_set=v_set, moving_v=moving_v, rotate_in_place=True, **switches)}
 
 
 def new_navigator(cfg, behaviour, forward_v, odometry):

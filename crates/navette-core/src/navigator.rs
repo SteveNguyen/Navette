@@ -266,7 +266,9 @@ impl Navigator {
                 (self.params.forward_v, w_hold, State::Forward)
             }
             Behaviour::Explore => {
-                let (v_req, w_req) = self.explore.step(t, pose, Some(scan), &self.grid, v_prev);
+                let (v_req, w_req) =
+                    self.explore
+                        .step(t, pose, Some(scan), &self.grid, v_prev, known.as_deref());
                 (v_req, w_req, self.explore.state())
             }
         };

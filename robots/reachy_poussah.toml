@@ -50,6 +50,13 @@ blind_m = 0.5
 # fastest admissible arc and the robot drives it at the cap (0.2 and 0.3 are both sent as 0.15). To make it
 # choose among speeds the robot really drives, list speeds under controller.v_max.
 v_set = [0.1, 0.2, 0.3]
+# The behaviour's switches below default to off in the core (the prototype's behaviour); this robot turns them on.
+# Why: in a 4-minute exploration the robot turned in place 54% of the time and reversed its turn ~16 times. 14 of
+# its 15 blocks came from the current scan's near sectors (obstacles touching the image bottom: walls at an angle
+# in a corridor, bottles, shoes), which the arc controller always put at the clearance radius, while the collision
+# monitor exempts those the map explains: on 512 of the 1405 steps without an admissible arc, the monitor's rule
+# allowed some. near_known = true: the arcs use the monitor's rule (the monitor itself is unchanged).
+near_known = true
 
 [behaviour]
 default = "explore"

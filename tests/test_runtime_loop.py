@@ -19,6 +19,8 @@ from navette.runtime.up import LiveUp
 from navette.testing.fakes import FakeNavigator, FakeRobot, FakeUpFilter, FakeWorld, camera_rotation
 
 ROBOT_TOML = Path(__file__).parents[1] / "robots" / "reachy_poussah.toml"
+# [explore] keys the reference robot sets away from the core defaults, on purpose (see its config file)
+REACHY_SWITCHES = {"near_known": True}
 IMU_MAX_AGE_S = 0.1
 
 
@@ -205,13 +207,19 @@ def test_reachy_config_gives_the_core_defaults_exactly():
     they must be, bit for bit, the core's defaults (the parameters of the golden sequences and of every
     recorded run), plus what its config says of the collision monitor, and its resume gate: resume_n and
     resume_margin differ from the core's defaults (2, 0.0) on purpose (restart hysteresis for the balancing
-    base)."""
+    base), and so do the exploration switches of REACHY_SWITCHES (see the config file's comments)."""
     import navette
 
     cfg = config.load(ROBOT_TOML)
     p = loop.navigator_params(cfg)
     assert p["frontier"] == navette.FrontierParams()
-    assert p["explore"] == navette.ExploreParams(rotate_in_place=True)  # the Navigator's own default
+    # the Navigator's own default, but the switches this robot turns on
+    assert p["explore"] == navette.ExploreParams(rotate_in_place=True, **REACHY_SWITCHES)
+    core = navette.ExploreParams()
+    assert all(getattr(core, k) != v for k, v in REACHY_SWITCHES.items())  # they do differ from the core's
+    # pinned to the core's defaults, it is the Navigator's default exactly
+    pinned = cfg.replace("explore", **{k: getattr(core, k) for k in REACHY_SWITCHES})
+    assert loop.navigator_params(pinned)["explore"] == navette.ExploreParams(rotate_in_place=True)
     assert p["explore"].v_set == [0.1, 0.2, 0.3] and p["explore"].moving_v == 0.05
     assert p["grid"] == {"robot_radius": 0.13} and navette.OccupancyGrid(**p["grid"]).n == navette.OccupancyGrid().n
     assert p["safety"] == navette.SafetyParams(radius=0.13, margin=0.05, v_max=0.4, decel=0.64, latency=0.9 + 0.63,

@@ -29,6 +29,8 @@ def test_reachy_poussah_values():
     assert (cfg.behaviour.resume_n, cfg.behaviour.resume_margin) == (4, 0.10)
     assert cfg.camera.body_z == 0.325 and cfg.camera.blind_m == 0.5
     assert cfg.explore.v_set == (0.1, 0.2, 0.3)
+    # the exploration fixes measured on the robot's runs, on (the core's defaults are off)
+    assert cfg.explore.near_known is True
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -75,6 +77,9 @@ def edited(tmp_path, old, new, count=1):
     (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = 0.1", r"\[explore\] v_set = 0.1: expected a non-empty list"),
     (r"^v_set = \[0.1, 0.2, 0.3\]$", 'v_set = ["0.1"]', r"\[explore\] v_set"),
     (r"^blind_m = 0.5$", "blind_m = -0.5", r"\[camera\] blind_m"),
+    (r"^near_known = true$", "", r"\[explore\]: missing \['near_known'\]"),
+    (r"^near_known = true$", "near_known = 1", r"\[explore\] near_known = 1: expected bool"),
+    (r"^near_known = true$", 'near_known = "true"', r"\[explore\] near_known = 'true': expected bool"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),

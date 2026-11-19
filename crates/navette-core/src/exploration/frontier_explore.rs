@@ -181,7 +181,8 @@ impl FrontierExplore {
     }
 
     /// Requested (v, w) at time `t` (s) from `pose` on `grid`. `scan`: this frame's (None: the last one is
-    /// kept for the planner). `v_applied`: the speed command sent last step (m/s).
+    /// kept for the planner). `v_applied`: the speed command sent last step (m/s). `near_known`: the scan's
+    /// sectors whose blind segment the map explains, for the arc controller (see [`ArcController::step`]).
     pub fn step(
         &mut self,
         t: f64,
@@ -189,6 +190,7 @@ impl FrontierExplore {
         scan: Option<&Scan>,
         grid: &OccupancyGrid,
         v_applied: f64,
+        near_known: Option<&[bool]>,
     ) -> (f64, f64) {
         let dt = self.last_t.map_or(0.0, |last| t - last);
         self.last_t = Some(t);
@@ -215,7 +217,7 @@ impl FrontierExplore {
         if matches!(c.state, State::Done | State::Look) {
             c.state = State::Drive;
         }
-        c.step(&mut self.goals, t, pose, scan, grid, v_applied)
+        c.step(&mut self.goals, t, pose, scan, grid, v_applied, near_known)
     }
 }
 
@@ -273,7 +275,7 @@ mod tests {
         let g = room(0.0); // closed room: nothing to explore
         let mut fe = explore();
         let cmds: Vec<(f64, f64)> = (0..100)
-            .map(|k| fe.step(k as f64 * 0.1, HERE, None, &g, 0.0))
+            .map(|k| fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, None))
             .collect();
         let n_look = cmds.iter().filter(|c| c.0 == 0.0 && c.1 > 0.0).count();
         assert!((n_look as f64 * 0.1 * 1.0 - TAU).abs() < 0.2); // one full turn
@@ -283,9 +285,9 @@ mod tests {
     #[test]
     fn a_frontier_coming_back_resumes_exploration() {
         let mut fe = explore();
-        fe.step(0.0, HERE, None, &room(0.0), 0.0);
+        fe.step(0.0, HERE, None, &room(0.0), 0.0, None);
         assert_eq!(fe.state(), State::Look);
-        let (v, w) = fe.step(1.0, HERE, Some(&scan(2.0, 2.0)), &room(0.8), 0.0);
+        let (v, w) = fe.step(1.0, HERE, Some(&scan(2.0, 2.0)), &room(0.8), 0.0, None);
         assert_eq!(fe.state(), State::Drive);
         assert!(v > 0.0 && w.abs() < 0.3); // the door is straight ahead
     }
@@ -328,7 +330,7 @@ mod tests {
         let mut fe = explore();
         fe.goals.recover = Some(-FRAC_PI_2);
         for k in 0..5 {
-            let (v, w) = fe.step(k as f64 * 0.1, HERE, None, &g, 0.0);
+            let (v, w) = fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, None);
             assert!(fe.goals.planner.done() && fe.state() != State::Look && v == 0.0 && w < 0.0);
         }
     }

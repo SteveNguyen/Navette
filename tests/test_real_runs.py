@@ -51,6 +51,8 @@ SCAN_BOOL, SCAN_FLOAT = ("seen", "near"), ("obstacle", "floor", "closest")
 OUT_FLOAT = ("out_v", "out_w", "out_v_req", "out_w_req")
 STEP_IN = ("dt", "a", "v", "w", "v_prev")
 MASK_SHAPE = (192, 320)  # the reference robot's floor masks
+# the [explore] switches at the core's defaults: the prototype's behaviour
+PROTOTYPE_EXPLORE = {"near_known": False}
 
 
 def runs(frames):
@@ -102,8 +104,10 @@ def replayed(run, model=True):
     from navette.runtime import replay as rp
 
     # the prototype's resume gate (the core's defaults): the runs and the reference replays were made with it,
-    # before the config's restart hysteresis
+    # before the config's restart hysteresis; and the prototype's exploration behaviour (the core's defaults
+    # of the [explore] switches the config turns on)
     cfg = config.load(ROBOT).replace("behaviour", resume_n=2, resume_margin=0.0)
+    cfg = cfg.replace("explore", **PROTOTYPE_EXPLORE)
     if model and not os.path.exists(cfg.adapter["model"]):
         pytest.skip(f"no floor model at {cfg.adapter['model']} (NAVETTE_ROBOT)")
     if model:

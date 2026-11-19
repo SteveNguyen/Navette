@@ -57,6 +57,14 @@ pub struct ExploreParams {
     /// Applied speed (m/s) from which the robot counts as moving (below it for `blocked_s`: blocked). It
     /// must stay under the slowest speed the robot is ever sent, or a slow robot is always "blocked".
     pub moving_v: f64,
+    /// The collision monitor's `near` rule for the arcs: an obstacle running off the image bottom is put at
+    /// the clearance radius only in the sectors whose blind segment the map does not explain (the
+    /// `near_known` mask given to [`ArcController::step`]); explained sectors keep their visible distance and
+    /// the map's obstacles cover the blind zone. False: every near sector at the clearance radius (the
+    /// prototype). Why: on the real robot 14 of 15 blocks came from the current scan's near sectors (walls
+    /// at an angle in a corridor, bottles, shoes), and on 512 of the 1405 steps without an admissible arc the
+    /// collision monitor, which applies this rule, would have allowed some.
+    pub near_known: bool,
 }
 
 impl Default for ExploreParams {
@@ -76,6 +84,7 @@ impl Default for ExploreParams {
             blocked_s: 1.0,
             rotate_in_place: false,
             moving_v: 0.05,
+            near_known: false,
         }
     }
 }
@@ -172,7 +181,10 @@ impl ArcController {
     }
 
     /// Requested (v, w) at time `t` (s) from `pose`. `scan`: this frame's (None: the arcs are checked
-    /// against the map alone). `v_applied`: the speed command sent last step (m/s).
+    /// against the map alone). `v_applied`: the speed command sent last step (m/s). `near_known`: per scan
+    /// sector, its blind segment is explained by the map (`OccupancyGrid::blind_known`, asked before the
+    /// frame went into the map); used only with `params.near_known`.
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         goals: &mut impl GoalSource,
@@ -181,6 +193,7 @@ impl ArcController {
         scan: Option<&Scan>,
         grid: &OccupancyGrid,
         v_applied: f64,
+        near_known: Option<&[bool]>,
     ) -> (f64, f64) {
         let goal = goals.choose_goal(t, pose, grid);
         self.goal = Some(goal);
@@ -199,8 +212,12 @@ impl ArcController {
         }
 
         // an obstacle running off the image bottom may be anywhere in the blind zone: at the clearance radius
+        // (with params.near_known: unless the map explains that sector, as the collision monitor does)
+        let not_known: Option<Vec<bool>> = near_known
+            .filter(|_| p.near_known)
+            .map(|k| k.iter().map(|&k| !k).collect());
         let mut pts = scan.map_or_else(Vec::new, |sc| {
-            boundary_points(sc, s.unseen_m, Some(s.clearance()), None)
+            boundary_points(sc, s.unseen_m, Some(s.clearance()), not_known.as_deref())
         });
         pts.extend(grid.obstacle_points(pose, MAP_RANGE_M));
         let cand: Vec<(f64, f64)> = p
@@ -282,7 +299,7 @@ mod tests {
         let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
         let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(goal_deg.to_radians());
-        (c.step(&mut goal, 0.0, HERE, Some(sc), &grid, v_applied), c)
+        (c.step(&mut goal, 0.0, HERE, Some(sc), &grid, v_applied, None), c)
     }
 
     #[test]
@@ -395,15 +412,15 @@ mod tests {
         let mut goal = FixedGoal(90f64.to_radians());
         let at = |deg: f64| Pose2::new(0.0, 0.0, deg.to_radians());
         assert_eq!(
-            c.step(&mut goal, 0.0, at(0.0), Some(&open()), &grid, 0.0),
+            c.step(&mut goal, 0.0, at(0.0), Some(&open()), &grid, 0.0, None),
             (0.0, 1.0)
         );
         // 40 deg left: below spin_above, but the spin goes on until within spin_done
         assert_eq!(
-            c.step(&mut goal, 0.1, at(50.0), Some(&open()), &grid, 0.0),
+            c.step(&mut goal, 0.1, at(50.0), Some(&open()), &grid, 0.0, None),
             (0.0, 1.0)
         );
-        let (v, _) = c.step(&mut goal, 0.2, at(75.0), Some(&open()), &grid, 0.0);
+        let (v, _) = c.step(&mut goal, 0.2, at(75.0), Some(&open()), &grid, 0.0, None);
         assert!(v > 0.0 && c.state == State::Drive);
     }
 
@@ -436,6 +453,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn near_known_puts_only_unexplained_near_sectors_at_the_clearance_radius() {
+        // a wall at an angle touching the image bottom on the left (near, read at 0.4 m), open ahead
+        let mut sc = scan(|b| if b > 10.0 { 0.4 } else { f64::INFINITY }, 38.0, 0.4);
+        sc.near = sc.bearing_deg.iter().map(|&b| b > 10.0 && b < 38.0).collect();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
+        let run = |near_known: bool, mask: Option<&[bool]>| {
+            let params = ExploreParams {
+                near_known,
+                ..Default::default()
+            };
+            let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
+            c.step(&mut FixedGoal(0.0), 0.0, HERE, Some(&sc), &grid, 0.3, mask)
+        };
+        let all = vec![true; 180];
+        let none = vec![false; 180];
+        // the prototype's rule (default): every near sector at the clearance radius, whatever the mask; the
+        // wall left of the path is then 0.18 m from the centre: no arc
+        let base = run(false, None);
+        assert_eq!(base, (0.0, 0.0));
+        assert_eq!(run(false, Some(&all)), base);
+        // with near_known: the same when the map explains nothing (or no mask is given) ...
+        assert_eq!(run(true, Some(&none)), base);
+        assert_eq!(run(true, None), base);
+        // ... and an arc once the map explains those sectors (they keep their visible 0.4 m)
+        let (v, _) = run(true, Some(&all));
+        assert!(v > 0.0);
+    }
+
     /// Counts the blocks, and then asks to turn right.
     struct Blocked(u32);
 
@@ -462,12 +508,15 @@ mod tests {
         let mut goals = Blocked(0);
         for k in 0..=10 {
             assert_eq!(
-                c.step(&mut goals, k as f64 * 0.1, HERE, Some(&sc), &grid, 0.0),
+                c.step(&mut goals, k as f64 * 0.1, HERE, Some(&sc), &grid, 0.0, None),
                 (0.0, 0.0)
             );
         }
         assert_eq!(c.blocked_since, Some(0.0));
-        assert_eq!(c.step(&mut goals, 1.1, HERE, Some(&sc), &grid, 0.0), (0.0, -1.0));
+        assert_eq!(
+            c.step(&mut goals, 1.1, HERE, Some(&sc), &grid, 0.0, None),
+            (0.0, -1.0)
+        );
         assert_eq!(
             (goals.0, c.state, c.blocked_since, c.goal),
             (1, State::Spin, None, Some(-1.0))
@@ -479,9 +528,9 @@ mod tests {
         let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default()).unwrap();
         let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(0.0);
-        let (v, _) = c.step(&mut goal, 0.0, HERE, Some(&open()), &grid, 0.0);
+        let (v, _) = c.step(&mut goal, 0.0, HERE, Some(&open()), &grid, 0.0, None);
         assert!(v > 0.0 && c.blocked_since == Some(0.0)); // asks to go, but the base is not moving
-        c.step(&mut goal, 0.1, HERE, Some(&open()), &grid, 0.2);
+        c.step(&mut goal, 0.1, HERE, Some(&open()), &grid, 0.2, None);
         assert_eq!(c.blocked_since, None);
     }
 }

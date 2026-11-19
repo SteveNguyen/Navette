@@ -1,11 +1,12 @@
 //! Bindings of navette_core::controller: `ExploreParams`, `ArcController`.
 
+use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;
 
 use navette_core::controller::dwa::{ArcController, ExploreParams, FixedGoal};
 use navette_core::geometry::Pose2;
 
-use crate::collision_monitor::{safety_params, PySafetyParams};
+use crate::collision_monitor::{safety_params, sector_mask, PySafetyParams};
 use crate::convert::param_err;
 use crate::occupancy_grid::PyOccupancyGrid;
 use crate::scan::PyScan;
@@ -23,6 +24,9 @@ use crate::scan::PyScan;
 ///   rotate_in_place  no admissible arc but the goal more than spin_done_deg off: turn toward it at once
 ///   moving_v         m/s, applied speed from which the robot counts as moving (below it for blocked_s:
 ///                    blocked); keep it under the slowest speed the robot is sent
+///   near_known       the collision monitor's near rule for the arcs: an obstacle off the image bottom is put
+///                    at the clearance radius only where the map does not explain it (the near_known mask
+///                    given to step); False: everywhere (the prototype)
 /// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap or w_spin <= 0,
 /// a negative or non-finite value): at construction, and where the parameters are used (the attributes can
 /// be set afterwards).
@@ -43,6 +47,7 @@ pub struct PyExploreParams {
     blocked_s: f64,
     rotate_in_place: bool,
     moving_v: f64,
+    near_known: bool,
 }
 
 impl PyExploreParams {
@@ -63,6 +68,7 @@ impl PyExploreParams {
             blocked_s: self.blocked_s,
             rotate_in_place: self.rotate_in_place,
             moving_v: self.moving_v,
+            near_known: self.near_known,
         };
         p.validate().map_err(param_err)?;
         Ok(p)
@@ -84,6 +90,7 @@ impl PyExploreParams {
             blocked_s: p.blocked_s,
             rotate_in_place: p.rotate_in_place,
             moving_v: p.moving_v,
+            near_known: p.near_known,
         }
     }
 }
@@ -93,7 +100,7 @@ impl PyExploreParams {
     #[new]
     #[pyo3(signature = (v_set=vec![0.1, 0.2, 0.3], w_max=1.2, n_w=13, horizon_s=1.0, k_heading=1.0, k_clear=0.6,
                         k_speed=0.3, clear_cap=1.0, spin_above_deg=70.0, spin_done_deg=20.0, w_spin=1.0,
-                        blocked_s=1.0, rotate_in_place=false, moving_v=0.05))]
+                        blocked_s=1.0, rotate_in_place=false, moving_v=0.05, near_known=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         v_set: Vec<f64>,
@@ -110,6 +117,7 @@ impl PyExploreParams {
         blocked_s: f64,
         rotate_in_place: bool,
         moving_v: f64,
+        near_known: bool,
     ) -> PyResult<Self> {
         let p = Self {
             v_set,
@@ -126,6 +134,7 @@ impl PyExploreParams {
             blocked_s,
             rotate_in_place,
             moving_v,
+            near_known,
         };
         p.to_core()?;
         Ok(p)
@@ -135,7 +144,7 @@ impl PyExploreParams {
         format!(
             "ExploreParams(v_set={:?}, w_max={:?}, n_w={}, horizon_s={:?}, k_heading={:?}, k_clear={:?}, \
              k_speed={:?}, clear_cap={:?}, spin_above_deg={:?}, spin_done_deg={:?}, w_spin={:?}, \
-             blocked_s={:?}, rotate_in_place={}, moving_v={:?})",
+             blocked_s={:?}, rotate_in_place={}, moving_v={:?}, near_known={})",
             self.v_set,
             self.w_max,
             self.n_w,
@@ -149,7 +158,8 @@ impl PyExploreParams {
             self.w_spin,
             self.blocked_s,
             if self.rotate_in_place { "True" } else { "False" },
-            self.moving_v
+            self.moving_v,
+            if self.near_known { "True" } else { "False" }
         )
     }
 }
@@ -204,6 +214,9 @@ impl PyArcController {
     /// Requested (v, w) at time t (s) from pose (x, y, theta) toward the fixed-frame heading `goal` (rad).
     /// scan: this frame's Scan; grid: the OccupancyGrid; v_applied: the speed command sent last step (m/s).
     /// Blocked for blocked_s: the controller turns to `goal` in place.
+    /// near_known: per-sector bool, blind segment explained by the map (OccupancyGrid.blind_known before the
+    /// frame went in); used only with ExploreParams.near_known.
+    #[pyo3(signature = (t, pose, scan, grid, v_applied, goal, near_known=None))]
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
@@ -214,12 +227,20 @@ impl PyArcController {
         grid: PyRef<'_, PyOccupancyGrid>,
         v_applied: f64,
         goal: f64,
+        near_known: Option<PyReadonlyArray1<'_, bool>>,
     ) -> PyResult<(f64, f64)> {
         let scan = scan.to_core(py)?;
+        let near_known = sector_mask(near_known, scan.len(), "near_known")?;
         let pose = Pose2::new(pose[0], pose[1], pose[2]);
-        Ok(self
-            .inner
-            .step(&mut FixedGoal(goal), t, pose, Some(&scan), &grid.inner, v_applied))
+        Ok(self.inner.step(
+            &mut FixedGoal(goal),
+            t,
+            pose,
+            Some(&scan),
+            &grid.inner,
+            v_applied,
+            near_known.as_deref(),
+        ))
     }
 }
 

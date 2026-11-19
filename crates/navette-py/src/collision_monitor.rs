@@ -127,7 +127,7 @@ pub fn safety_params(p: Option<PyRef<'_, PySafetyParams>>) -> PyResult<SafetyPar
 }
 
 /// A per-sector bool array as a Vec, checked against the scan's number of sectors.
-fn sector_mask(
+pub(crate) fn sector_mask(
     mask: Option<PyReadonlyArray1<'_, bool>>,
     n: usize,
     name: &str,

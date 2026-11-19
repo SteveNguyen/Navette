@@ -4,6 +4,7 @@ given: the prototype chose it on a local map, which the frontier planner replace
 import math
 
 import numpy as np
+import pytest
 
 from navette import ArcController, ExploreParams, OccupancyGrid, Scan
 
@@ -59,6 +60,24 @@ def test_blocked_for_blocked_s_turns_to_the_goal_again():
     cmds = [ex.step(k * 0.1, (0, 0, 0), sc, OccupancyGrid(), 0.0, 0.0) for k in range(12)]
     assert cmds[:11] == [(0.0, 0.0)] * 11 and ex.blocked_since is None
     assert cmds[11] == (0.0, ExploreParams().w_spin) and ex.state == "SPIN"
+
+
+def test_near_known_uses_the_collision_monitor_s_near_rule():
+    # a wall at an angle touching the image bottom on the left (near sectors at 0.4 m), open ahead
+    near = (BEAR > 10) & (BEAR < 38)
+    sc = Scan(BEAR, np.abs(BEAR) < 38, np.where(near, 0.4, np.inf), near, np.full(180, 2.5), np.full(180, 0.4))
+    known, unknown = np.ones(180, bool), np.zeros(180, bool)
+    # default (the prototype): every near sector at the clearance radius, whatever the mask: no arc
+    assert ArcController().step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0) == (0.0, 0.0)
+    assert ArcController().step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0, known) == (0.0, 0.0)
+    on = ExploreParams(near_known=True)
+    assert on.near_known and not ExploreParams().near_known and "near_known=True" in repr(on)
+    # on: only the sectors the map does not explain
+    assert ArcController(on).step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0, unknown) == (0.0, 0.0)
+    v, _ = ArcController(on).step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0, near_known=known)
+    assert v > 0
+    with pytest.raises(ValueError, match="near_known has 3 entries"):
+        ArcController(on).step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0, np.ones(3, bool))
 
 
 def test_map_obstacles_count_as_the_scan_s():
