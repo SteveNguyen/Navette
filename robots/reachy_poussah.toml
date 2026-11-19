@@ -1,0 +1,90 @@
+# Reachy Mini on the Poussah self-balancing base.
+# Lengths in m, times in s, speeds in m/s and rad/s. Every key is required (navette/config.py).
+
+[robot]
+name = "reachy_poussah"
+adapter = "navette.robots.reachy_poussah"
+
+[footprint]
+radius = 0.13   # Mini (17 cm cylinder) on the ~25 cm wide base
+margin = 0.05
+
+[safety]
+# Stopping distance planned at speed v: v * (perception.stale_s + base_lag_s) + v^2 / (2 decel).
+# Measured with the Mini on the base, stop commands at 0.184 / 0.209 / 0.342 m/s -> 0.143 / 0.165 / 0.307 m
+# travelled; least squares: lag 0.63 s (the base rolls on while the balance controller leans back), decel
+# 0.64 m/s^2, residuals 1 mm. (The base alone gave 0.13 s / 0.16 m/s^2, which under-predicts with the Mini on.)
+# Planned stop with stale_s = 0.9: 0.25 m at 0.15 m/s, 0.34 m at 0.2, 0.53 m at 0.3.
+v_max = 0.4
+decel = 0.64
+base_lag_s = 0.63
+unseen_m = 0.35
+reverse_max = 0.0
+step = 0.02
+n_speeds = 20
+
+[perception]
+# Age of a navigator output = capture-to-output latency + up to one step period. Measured on the CM4, explore
+# behaviour on the base: 391 / 537 / 852 ms (p50 / p95 / max). 0.3 s can never hold at this frame rate, and
+# 0.6 s halted every few tens of seconds; 0.9 s held a 224 s exploration.
+stale_s = 0.9
+imu_max_age_s = 0.1
+up_g_s = 1.0
+
+[camera]
+# Height of the Mini's body frame above the floor when on the base. NOT MEASURED: 0.325 puts the camera at
+# ~0.35 m. (Mini standing on the floor: 0.215.)
+body_z = 0.325
+
+[behaviour]
+default = "explore"
+forward_v = 0.15
+resume_n = 2
+
+[controller]
+v_max = 0.15           # cap after the collision monitor
+w_max = 0.5
+cmd_hz = 20.0          # the base's dead-man is 0.5 s
+start_timeout_s = 10.0 # stand-up: measured 0.25 s
+
+[page]
+port = 8090
+# The phone's STOP goes over the robot's WiFi, which once dropped completely while the robot kept exploring
+# over Bluetooth. The page polls every 0.5 s; a run halts when the polls stop for this long. 0 = off.
+timeout_s = 2.0
+# The CM4's WiFi and Bluetooth share one radio: a preview every 0.5 s coincided with a 0.9 s stall of the
+# base's telemetry.
+preview_s = 2.0
+
+[glance]
+n_frames = 2
+settle_s = 0.3
+cooldown_s = 5.0
+moved_m = 0.1
+turned_deg = 20.0
+retries = 2
+
+[adapter]
+# Files the robot needs, relative to this file (not in the repository):
+#   model       floor segmentation model (.onnx, input "input" 1x3x192x320, 2 or 3 output channels)
+#   calib       camera intrinsics: {"image_resolution": [W, H], "K": 3x3, "D": OpenCV distortion}
+#   r_cam_imu   {"R_cam_imu": 3x3}, IMU axes -> camera axes
+#   handeye     {"T_head_cam_fitted": 4x4}, camera pose in the head frame
+paths = ["model", "calib", "r_cam_imu", "handeye"]
+model = "models/floor.onnx"
+calib = "calib/calib.json"
+r_cam_imu = "calib/R_cam_imu.json"
+handeye = "calib/handeye_X.json"
+floor_thr = 0.7          # floor probability cutoff
+under_thr = 0.5          # 'under' cutoff (3-channel model): floor with something low above it is not drivable
+model_threads = 2        # CM4: 1 -> 86 ms, 2 -> 60, 3 -> 56, 4 -> 62; 2 leaves cores to the rest
+camera_latency_s = 0.038 # the frames lag the IMU by this much
+nav_pitch_deg = 15.0     # head pitch (down) while navigating
+# Head pitch of a glance at the ground just ahead; 0 = no glance. Keep 0: a 35 deg head move shifted the
+# centre of mass of the balancing base and its firmware cut the motors (runaway: both wheels past 16 rad/s).
+glance_pitch_deg = 0.0
+daemon_python = "/venvs/mini_daemon/bin/python"  # runs the 400 Hz IMU reader (needs smbus3)
+base_link = "ble"        # "ble" or "usb"
+ble_name = "rmini_wheels"
+usb_port = "/dev/ttyACM0"
+nav_rate_hz = 50         # the base's telemetry rate
