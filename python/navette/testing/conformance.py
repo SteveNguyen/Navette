@@ -18,6 +18,11 @@ from navette.interfaces import DRIVING, FAULT, MAX_CAMERA_YAW_DEG, STARTING, STO
 
 STATES = (STOPPED, STARTING, DRIVING, FAULT)
 PERIOD_S = 0.05  # command period used here (20 Hz, as the controller)
+# "Stopped" = the pose stays within STILL_M (forward) and STILL_RAD over STILL_WINDOW_S. A balancing base never
+# reads still at an instant: at rest it sways (Poussah with a Reachy Mini: +-2 cm, +-0.1 m/s, gyro +-0.2 rad/s),
+# so its allowance is wider; a statically stable base gets 5 mm.
+STILL_WINDOW_S, STILL_RAD = 1.0, 0.05
+STILL_M = {True: 0.03, False: 0.005}  # by Base.balancing
 
 
 def _on_clock(t, now, what):
@@ -150,6 +155,23 @@ def _moved(a, b):
     return c * dx + s * dy, -s * dx + c * dy, math.remainder(b.theta - a.theta, 2 * math.pi)
 
 
+def _watch(base, duration_s, clock, sleep):
+    """Odometry sampled every PERIOD_S / 5 for duration_s, no command sent: [(time since the call, odometry)]."""
+    t0, out, last = clock(), [], None
+    while clock() - t0 < duration_s:
+        sleep(PERIOD_S / 5)
+        last = _odometry(base, clock, last)
+        out.append((clock() - t0, last))
+    return out
+
+
+def _spread(ref, samples):
+    """(forward spread m, turn spread rad) of the samples' poses, measured in ref's frame."""
+    f = [_moved(ref, o)[0] for o in samples]
+    th = [_moved(ref, o)[2] for o in samples]
+    return max(f) - min(f), max(th) - min(th)
+
+
 def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start_timeout_s=10.0, inject_fault=None,
                clock=time.monotonic, sleep=time.sleep):
     """ROBOT MOTION on a real base (v m/s forward for drive_s, then w rad/s for drive_s, then two short
@@ -159,10 +181,11 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start
     odometry on the clock; forward command -> x grows by about v * drive_s, measured v > 0; turn command ->
     theta grows (counter-clockwise), measured w > 0; the dead-man: the base stops by itself within deadman_s
     of the last command, and afterwards either the session goes on (the next command is applied) or the base
-    reports FAULT with a reason (both allowed by the contract); stop() while driving brakes: the measured
-    speed is ~0 within stop_s and v * stop_s (a stop() that only latches leaves the base rolling until its
-    dead-man); stop() is latched (commands ignored), park() returns True; then, if inject_fault is given (a
-    function that makes the base fail), a new session reports FAULT with a reason.
+    reports FAULT with a reason (both allowed by the contract); stop() while driving brakes: the base is still
+    (STILL_M, STILL_RAD over STILL_WINDOW_S) from stop_s after it on, having rolled at most about v * stop_s (a
+    stop() that only latches leaves the base rolling until its dead-man); stop() is latched (commands
+    ignored), park() returns True; then, if inject_fault is given (a function that makes the base fail), a new
+    session reports FAULT with a reason.
     stop_s: the time the base needs to stop from v. It must be shorter than the base's dead-man time plus
     its braking, or a stop() that does not brake passes (the reference robot, 0.63 s of lag: 1.0)."""
     assert isinstance(base.balancing, bool), "Base.balancing must be a bool"
@@ -200,10 +223,11 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start
     _drive(base, v, 0.0, 0.3, clock, sleep)
     sleep(deadman_s)
     o4 = _odometry(base, clock)
-    sleep(0.3)
-    o5 = _odometry(base, clock, o4)
-    assert abs(_moved(o4, o5)[0]) < 0.005 and abs(o5.v) < 0.02, \
-        f"dead-man: the base still moves {deadman_s} s after the last command (v {o5.v:+.3f} m/s)"
+    still_m = STILL_M[base.balancing]
+    df, dth = _spread(o4, [o for _, o in _watch(base, STILL_WINDOW_S, clock, sleep)])
+    assert df < still_m and dth < STILL_RAD, \
+        f"dead-man: the base still moves {deadman_s} s after the last command ({df * 100:.1f} cm, " \
+        f"{dth:.3f} rad over the next {STILL_WINDOW_S} s; allowed {still_m * 100:.1f} cm, {STILL_RAD} rad)"
     # after the dead-man: the session goes on, or the base says FAULT (then a new session is started)
     st = base.status()
     assert st.state in (DRIVING, FAULT), \
@@ -217,19 +241,19 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start
     o6 = _odometry(base, clock, _drive(base, v, 0.0, 0.3, clock, sleep))
     assert o6.v > 0.2 * v, f"command(v={v}) after the dead-man did not move the base (v {o6.v:+.3f} m/s)"
     base.stop()
-    t_stop, o7 = clock(), o6
-    while abs(o7.v) >= 0.02 or abs(o7.w) >= 0.05:
-        assert clock() - t_stop <= stop_s, \
-            f"stop() did not brake: v {o7.v:+.3f} m/s {clock() - t_stop:.2f} s after it (stop_s {stop_s}); " \
-            f"closing the session is not enough, the base must be told to stop"
-        sleep(PERIOD_S / 5)
-        o7 = _odometry(base, clock, o7)
-    assert _moved(o6, o7)[0] <= v * stop_s + 0.01, \
-        f"stop() at {v} m/s: the base rolled {_moved(o6, o7)[0]:.3f} m (more than v * stop_s)"
+    samples = _watch(base, stop_s + STILL_WINDOW_S, clock, sleep)
+    df, dth = _spread(o6, [o for t, o in samples if t >= stop_s])
+    assert df < still_m and dth < STILL_RAD, \
+        f"stop() did not brake: the base still moves {stop_s} s after it ({df * 100:.1f} cm, {dth:.3f} rad over " \
+        f"the next {STILL_WINDOW_S} s); closing the session is not enough, the base must be told to stop"
+    rolled = max(_moved(o6, o)[0] for _, o in samples)
+    assert rolled <= v * stop_s + still_m + 0.01, \
+        f"stop() at {v} m/s: the base rolled {rolled:.3f} m (more than v * stop_s)"
+    o7 = samples[-1][1]
 
     _drive(base, v, 0.0, 0.3, clock, sleep)
     o8 = _odometry(base, clock, o7)
-    assert abs(_moved(o7, o8)[0]) < 0.01, "stop() is not latched: a later command() moved the base"
+    assert abs(_moved(o7, o8)[0]) < still_m + 0.005, "stop() is not latched: a later command() moved the base"
     assert base.status().state != DRIVING, "status() says DRIVING after stop()"
     t_end = clock() + 10.0
     while not base.park():
