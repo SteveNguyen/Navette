@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use navette_core::geometry::{Point2, Pose2};
 use navette_core::occupancy_grid::{OccupancyGrid, OccupancyGridParams};
 
-use crate::convert::{rows, rows_to_py};
+use crate::convert::{param_err, rows, rows_to_py};
 use crate::scan::PyScan;
 
 fn pose2(p: [f64; 3]) -> Pose2 {
@@ -22,6 +22,8 @@ fn pose2(p: [f64; 3]) -> Pose2 {
 ///   max_obstacle_m  obstacles at or beyond this range are not written
 ///   robot_radius    footprint marked free at each keyframe
 ///   key_m, key_deg, key_s   a keyframe is taken when the robot moved, turned or waited this much
+/// ValueError on an invalid parameter: res, size_m, clamp or sigma_ref <= 0, more than 4096 cells per side
+/// (size_m / res), a negative threshold, range or keyframe distance, anything not finite.
 #[pyclass(name = "OccupancyGrid", module = "navette")]
 pub struct PyOccupancyGrid {
     pub(crate) inner: OccupancyGrid,
@@ -58,7 +60,7 @@ impl PyOccupancyGrid {
         key_m: f64,
         key_deg: f64,
         key_s: f64,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let params = OccupancyGridParams {
             res,
             size_m,
@@ -71,9 +73,9 @@ impl PyOccupancyGrid {
             key_deg,
             key_s,
         };
-        Self {
-            inner: OccupancyGrid::new(params),
-        }
+        Ok(Self {
+            inner: OccupancyGrid::new(params).map_err(param_err)?,
+        })
     }
 
     /// Cell size (m).

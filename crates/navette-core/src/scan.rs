@@ -15,6 +15,7 @@
 //! (range, bearing) f32, the scan arrays f64.
 
 use crate::geometry::{dot, gravity_frame, Mat3, Vec3};
+use crate::params::{self, ParamError};
 
 /// Floor model output size: the default mask shape, (rows, columns).
 pub const MASK_SHAPE: (usize, usize) = (192, 320);
@@ -91,9 +92,30 @@ impl Default for ScanParams {
     }
 }
 
-/// An input whose size does not match the mask shape.
+impl ScanParams {
+    /// sector_deg in [0.01, 360] (0 would ask for endless sectors), max_range > 0, near_tol >= 0, all finite.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        if !(0.01..=360.0).contains(&self.sector_deg) {
+            return Err(ParamError(format!(
+                "ScanParams.sector_deg = {}: must be in [0.01, 360]",
+                self.sector_deg
+            )));
+        }
+        params::positive("ScanParams.max_range", self.max_range)?;
+        params::non_negative("ScanParams.near_tol", self.near_tol)
+    }
+}
+
+/// An input a [`FreeSpace`] cannot work with: a size that does not match the mask shape, or an invalid
+/// parameter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShapeError(pub String);
+
+impl From<ParamError> for ShapeError {
+    fn from(e: ParamError) -> Self {
+        Self(e.0)
+    }
+}
 
 impl std::fmt::Display for ShapeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,6 +153,7 @@ impl FreeSpace {
         shape: (usize, usize),
         params: ScanParams,
     ) -> Result<Self, ShapeError> {
+        params.validate()?;
         let px = shape.0 * shape.1;
         if rays.len() != px || rays_low.len() != px {
             return Err(ShapeError(format!(
@@ -467,6 +490,26 @@ mod tests {
 
     #[test]
     fn shape_mismatch_is_an_error() {
+        for (sector_deg, max_range, near_tol) in [
+            (0.0, 2.5, 0.05),
+            (-2.0, 2.5, 0.05),
+            (f64::NAN, 2.5, 0.05),
+            (361.0, 2.5, 0.05),
+            (2.0, 0.0, 0.05),
+            (2.0, f64::INFINITY, 0.05),
+            (2.0, 2.5, -0.01),
+        ] {
+            let params = ScanParams {
+                sector_deg,
+                max_range,
+                near_tol,
+                ..Default::default()
+            };
+            let err = FreeSpace::new(vec![], vec![], (0, 0), params)
+                .err()
+                .expect("invalid");
+            assert!(err.0.starts_with("ScanParams."), "{err}");
+        }
         assert!(FreeSpace::new(
             vec![[0.0; 3]; 5],
             vec![[0.0; 3]; 6],

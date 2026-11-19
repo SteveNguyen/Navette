@@ -5,7 +5,8 @@ use pyo3::prelude::*;
 use navette_core::controller::dwa::{ArcController, ExploreParams, FixedGoal};
 use navette_core::geometry::Pose2;
 
-use crate::collision_monitor::PySafetyParams;
+use crate::collision_monitor::{safety_params, PySafetyParams};
+use crate::convert::param_err;
 use crate::occupancy_grid::PyOccupancyGrid;
 use crate::scan::PyScan;
 
@@ -20,6 +21,9 @@ use crate::scan::PyScan;
 ///   w_spin           rad/s, yaw rate of the turns in place
 ///   blocked_s        s without an admissible arc or without motion: blocked
 ///   rotate_in_place  no admissible arc but the goal more than spin_done_deg off: turn toward it at once
+/// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap or w_spin <= 0,
+/// a negative or non-finite value): at construction, and where the parameters are used (the attributes can
+/// be set afterwards).
 #[pyclass(name = "ExploreParams", module = "navette", get_all, set_all, eq)]
 #[derive(Clone, PartialEq)]
 pub struct PyExploreParams {
@@ -39,8 +43,9 @@ pub struct PyExploreParams {
 }
 
 impl PyExploreParams {
-    pub fn to_core(&self) -> ExploreParams {
-        ExploreParams {
+    /// Copy into the core type, validated (the attributes are settable from Python).
+    pub fn to_core(&self) -> PyResult<ExploreParams> {
+        let p = ExploreParams {
             v_set: self.v_set.clone(),
             w_max: self.w_max,
             n_w: self.n_w,
@@ -54,7 +59,9 @@ impl PyExploreParams {
             w_spin: self.w_spin,
             blocked_s: self.blocked_s,
             rotate_in_place: self.rotate_in_place,
-        }
+        };
+        p.validate().map_err(param_err)?;
+        Ok(p)
     }
 
     pub fn from_core(p: &ExploreParams) -> Self {
@@ -97,8 +104,8 @@ impl PyExploreParams {
         w_spin: f64,
         blocked_s: f64,
         rotate_in_place: bool,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let p = Self {
             v_set,
             w_max,
             n_w,
@@ -112,7 +119,9 @@ impl PyExploreParams {
             w_spin,
             blocked_s,
             rotate_in_place,
-        }
+        };
+        p.to_core()?;
+        Ok(p)
     }
 
     fn __repr__(&self) -> String {
@@ -137,9 +146,12 @@ impl PyExploreParams {
     }
 }
 
-/// The given parameters, or `default`.
-pub fn explore_params(p: Option<PyRef<'_, PyExploreParams>>, default: ExploreParams) -> ExploreParams {
-    p.map_or(default, |p| p.to_core())
+/// The given parameters (validated), or `default`.
+pub fn explore_params(
+    p: Option<PyRef<'_, PyExploreParams>>,
+    default: ExploreParams,
+) -> PyResult<ExploreParams> {
+    p.map_or(Ok(default), |p| p.to_core())
 }
 
 /// Arc selection toward a goal heading (see the core module's documentation): each step tries (v, w) arcs
@@ -156,11 +168,14 @@ pub struct PyArcController {
 impl PyArcController {
     #[new]
     #[pyo3(signature = (p=None, safety=None))]
-    fn new(p: Option<PyRef<'_, PyExploreParams>>, safety: Option<PyRef<'_, PySafetyParams>>) -> Self {
-        let safety = safety.map_or_else(Default::default, |s| s.to_core());
-        Self {
-            inner: ArcController::new(explore_params(p, ExploreParams::default()), safety),
-        }
+    fn new(
+        p: Option<PyRef<'_, PyExploreParams>>,
+        safety: Option<PyRef<'_, PySafetyParams>>,
+    ) -> PyResult<Self> {
+        let params = explore_params(p, ExploreParams::default())?;
+        Ok(Self {
+            inner: ArcController::new(params, safety_params(safety)?).map_err(param_err)?,
+        })
     }
 
     #[getter]

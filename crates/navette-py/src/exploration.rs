@@ -12,9 +12,9 @@ use navette_core::exploration::frontier::{self, FrontierParams, FrontierPlanner}
 use navette_core::exploration::frontier_explore::FrontierExplore;
 use navette_core::geometry::{Point2, Pose2};
 
-use crate::collision_monitor::PySafetyParams;
+use crate::collision_monitor::{safety_params, PySafetyParams};
 use crate::controller::{explore_params, PyExploreParams};
-use crate::convert::rows_to_py;
+use crate::convert::{param_err, rows_to_py};
 use crate::occupancy_grid::PyOccupancyGrid;
 use crate::scan::PyScan;
 
@@ -38,6 +38,8 @@ fn point_to_py(py: Python<'_>, p: Point2) -> Bound<'_, PyArray1<f64>> {
 ///   keep_ratio        switch target only if the new one costs < keep_ratio x the current (0: commit)
 ///   target_timeout_s  a target not reached after this long is banned,
 ///   ban_s, ban_r      for ban_s, within ban_r of it
+/// ValueError on an invalid value (negative, not finite, soft_m or target_timeout_s = 0): at construction,
+/// and where the parameters are used (the attributes can be set afterwards).
 #[pyclass(name = "FrontierParams", module = "navette", get_all, set_all, eq)]
 #[derive(Clone, PartialEq)]
 pub struct PyFrontierParams {
@@ -57,8 +59,9 @@ pub struct PyFrontierParams {
 }
 
 impl PyFrontierParams {
-    pub fn to_core(&self) -> FrontierParams {
-        FrontierParams {
+    /// Copy into the core type, validated (the attributes are settable from Python).
+    pub fn to_core(&self) -> PyResult<FrontierParams> {
+        let p = FrontierParams {
             clear: self.clear,
             soft_m: self.soft_m,
             soft_k: self.soft_k,
@@ -72,7 +75,9 @@ impl PyFrontierParams {
             target_timeout_s: self.target_timeout_s,
             ban_s: self.ban_s,
             ban_r: self.ban_r,
-        }
+        };
+        p.validate().map_err(param_err)?;
+        Ok(p)
     }
 
     fn from_core(p: &FrontierParams) -> Self {
@@ -115,8 +120,8 @@ impl PyFrontierParams {
         target_timeout_s: f64,
         ban_s: f64,
         ban_r: f64,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let p = Self {
             clear,
             soft_m,
             soft_k,
@@ -130,7 +135,9 @@ impl PyFrontierParams {
             target_timeout_s,
             ban_s,
             ban_r,
-        }
+        };
+        p.to_core()?;
+        Ok(p)
     }
 
     fn __repr__(&self) -> String {
@@ -155,9 +162,9 @@ impl PyFrontierParams {
     }
 }
 
-/// The given parameters, or the defaults.
-pub fn frontier_params(p: Option<PyRef<'_, PyFrontierParams>>) -> FrontierParams {
-    p.map_or_else(FrontierParams::default, |p| p.to_core())
+/// The given parameters (validated), or the defaults.
+pub fn frontier_params(p: Option<PyRef<'_, PyFrontierParams>>) -> PyResult<FrontierParams> {
+    p.map_or_else(|| Ok(FrontierParams::default()), |p| p.to_core())
 }
 
 /// A 2-D array as a row-major Vec and its shape (h, w).
@@ -252,10 +259,10 @@ pub struct PyFrontierPlanner {
 impl PyFrontierPlanner {
     #[new]
     #[pyo3(signature = (p=None))]
-    fn new(p: Option<PyRef<'_, PyFrontierParams>>) -> Self {
-        Self {
-            inner: FrontierPlanner::new(frontier_params(p)),
-        }
+    fn new(p: Option<PyRef<'_, PyFrontierParams>>) -> PyResult<Self> {
+        Ok(Self {
+            inner: FrontierPlanner::new(frontier_params(p)?).map_err(param_err)?,
+        })
     }
 
     #[getter]
@@ -360,14 +367,14 @@ impl PyFrontierExplore {
             rotate_in_place: true,
             ..Default::default()
         };
-        let safety = safety.map_or_else(Default::default, |s| s.to_core());
-        let fp = frontier_params(fp);
+        let safety = safety_params(safety)?;
+        let fp = frontier_params(fp)?;
         Ok(Self {
-            inner: FrontierExplore::new(explore_params(p, default), safety, fp),
+            inner: FrontierExplore::new(explore_params(p, default)?, safety, fp).map_err(param_err)?,
             planner: Py::new(
                 py,
                 PyFrontierPlanner {
-                    inner: FrontierPlanner::new(fp),
+                    inner: FrontierPlanner::new(fp).map_err(param_err)?,
                 },
             )?,
         })

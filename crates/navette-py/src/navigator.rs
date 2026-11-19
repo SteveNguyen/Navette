@@ -9,9 +9,9 @@ use navette_core::navigator::{Behaviour, NavOut, Navigator, NavigatorParams};
 use navette_core::occupancy_grid::{OccupancyGrid, OccupancyGridParams};
 use navette_core::scan::Scan;
 
-use crate::collision_monitor::PySafetyParams;
+use crate::collision_monitor::{safety_params, PySafetyParams};
 use crate::controller::{explore_params, PyExploreParams};
-use crate::convert::rows_to_py;
+use crate::convert::{param_err, rows_to_py};
 use crate::exploration::{frontier_params, PyFrontierParams};
 use crate::occupancy_grid::PyOccupancyGrid;
 use crate::scan::{PyFreeSpace, PyScan};
@@ -100,6 +100,8 @@ impl PyNavOut {
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
 /// centres, path and target in the fixed frame, for display; safety, behaviour, odometry, resume_n,
 /// forward_v as given.
+/// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
+/// be set after they were built).
 #[pyclass(name = "Navigator", module = "navette")]
 pub struct PyNavigator {
     inner: Navigator,
@@ -160,14 +162,14 @@ impl PyNavigator {
             None => Py::new(
                 py,
                 PyOccupancyGrid {
-                    inner: OccupancyGrid::new(OccupancyGridParams::default()),
+                    inner: OccupancyGrid::new(OccupancyGridParams::default()).map_err(param_err)?,
                 },
             )?,
         };
         let defaults = NavigatorParams::default();
         let grid_params = *grid.borrow(py).inner.params();
         let params = NavigatorParams {
-            safety: safety.map_or(defaults.safety, |s| s.to_core()),
+            safety: safety_params(safety)?,
             behaviour,
             odometry,
             resume_n,
@@ -177,8 +179,8 @@ impl PyNavigator {
                 size_m: grid_params.res,
                 ..grid_params
             },
-            frontier: frontier_params(frontier),
-            explore: explore_params(explore, defaults.explore),
+            frontier: frontier_params(frontier)?,
+            explore: explore_params(explore, defaults.explore)?,
             tilt_trust: tilt_trust.map_or(defaults.tilt_trust, |t| {
                 let t = &t.inner;
                 navette_core::state_estimation::tilt_trust::TiltTrust {
@@ -189,7 +191,7 @@ impl PyNavigator {
             }),
         };
         Ok(Self {
-            inner: Navigator::new(params),
+            inner: Navigator::new(params).map_err(param_err)?,
             grid,
         })
     }

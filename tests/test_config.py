@@ -65,6 +65,24 @@ def edited(tmp_path, old, new, count=1):
     (r"^resume_n = 2$", "resume_n = 2.5", r"\[behaviour\] resume_n = 2.5: expected int"),
     (r'^default = "explore"$', 'default = "v3"', r"'explore' or 'forward'"),
     (r"^\[page\]$", "[pages]", r"missing tables \['page'\]; unknown tables \['pages'\]"),
+    # ranges: the key is named
+    (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
+    (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),
+    (r"^step = 0.02$", "step = -0.02", r"\[safety\] step"),
+    (r"^n_speeds = 20$", "n_speeds = 0", r"\[safety\] n_speeds = 0: must be finite and > 0"),
+    (r"^v_max = 0.4$", "v_max = nan", r"\[safety\] v_max = nan"),
+    (r"^base_lag_s = 0.63$", "base_lag_s = -0.1", r"\[safety\] base_lag_s = -0.1: must be finite and >= 0"),
+    (r"^radius = 0.13 ", "radius = -0.13 ", r"\[footprint\] radius"),
+    (r"^margin = 0.05$", "margin = inf", r"\[footprint\] margin = inf"),
+    (r"^stale_s = 0.9$", "stale_s = 0", r"\[perception\] stale_s"),
+    (r"^body_z = 0.325$", "body_z = 0.0", r"\[camera\] body_z"),
+    (r"^cmd_hz = 20.0 ", "cmd_hz = 0.0 ", r"\[controller\] cmd_hz"),
+    (r"^v_max = 0.15 ", "v_max = -0.15 ", r"\[controller\] v_max"),
+    (r"^port = 8090$", "port = 0", r"\[page\] port"),
+    (r"^port = 8090$", "port = 70000", r"\[page\] port = 70000: must be at most 65535"),
+    (r"^timeout_s = 2.0$", "timeout_s = -1.0", r"\[page\] timeout_s"),
+    (r"^n_frames = 2$", "n_frames = 0", r"\[glance\] n_frames"),
+    (r"^resume_n = 2$", "resume_n = -1", r"\[behaviour\] resume_n"),
 ])
 def test_bad_config_is_an_error(tmp_path, old, new, message):
     with pytest.raises(ValueError, match=message):

@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 
 use navette_core::collision_monitor::{self as core, SafetyParams};
 
-use crate::convert::{rows, rows_to_py};
+use crate::convert::{param_err, rows, rows_to_py};
 use crate::scan::PyScan;
 
 /// Robot footprint and stopping model of the collision monitor (plain attributes, like a dataclass):
@@ -21,6 +21,9 @@ use crate::scan::PyScan;
 ///   reverse_max  m/s, allowed reverse speed (blind)
 ///   step         m, arc sampling
 ///   n_speeds     candidate speeds between 0 and the request
+/// Invalid values (step, decel or v_max <= 0, a negative length, n_speeds = 0, anything not finite) raise
+/// ValueError: here, and wherever the parameters are used, since the attributes can be set afterwards
+/// (step = 0 or decel = 0 would make the arc sampling endless).
 #[pyclass(name = "SafetyParams", module = "navette", get_all, set_all, eq)]
 #[derive(PartialEq)]
 pub struct PySafetyParams {
@@ -36,9 +39,10 @@ pub struct PySafetyParams {
 }
 
 impl PySafetyParams {
-    /// Copy into the core type (what the Rust side of every other binding consumes).
-    pub fn to_core(&self) -> SafetyParams {
-        SafetyParams {
+    /// Copy into the core type (what the Rust side of every other binding consumes), validated: the
+    /// attributes are settable from Python, so the check is made at every use (a few comparisons).
+    pub fn to_core(&self) -> PyResult<SafetyParams> {
+        let p = SafetyParams {
             radius: self.radius,
             margin: self.margin,
             v_max: self.v_max,
@@ -48,21 +52,23 @@ impl PySafetyParams {
             reverse_max: self.reverse_max,
             step: self.step,
             n_speeds: self.n_speeds,
-        }
+        };
+        p.validate().map_err(param_err)?;
+        Ok(p)
     }
 
     pub fn from_core(p: &SafetyParams) -> Self {
-        Self::new(
-            p.radius,
-            p.margin,
-            p.v_max,
-            p.decel,
-            p.latency,
-            p.unseen_m,
-            p.reverse_max,
-            p.step,
-            p.n_speeds,
-        )
+        Self {
+            radius: p.radius,
+            margin: p.margin,
+            v_max: p.v_max,
+            decel: p.decel,
+            latency: p.latency,
+            unseen_m: p.unseen_m,
+            reverse_max: p.reverse_max,
+            step: p.step,
+            n_speeds: p.n_speeds,
+        }
     }
 }
 
@@ -82,8 +88,8 @@ impl PySafetyParams {
         reverse_max: f64,
         step: f64,
         n_speeds: usize,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        let p = Self {
             radius,
             margin,
             v_max,
@@ -93,7 +99,9 @@ impl PySafetyParams {
             reverse_max,
             step,
             n_speeds,
-        }
+        };
+        p.to_core()?;
+        Ok(p)
     }
 
     fn __repr__(&self) -> String {
@@ -113,9 +121,9 @@ impl PySafetyParams {
     }
 }
 
-/// The given parameters, or the defaults.
-fn params(p: Option<PyRef<'_, PySafetyParams>>) -> SafetyParams {
-    p.map_or_else(SafetyParams::default, |p| p.to_core())
+/// The given parameters (validated), or the defaults.
+pub fn safety_params(p: Option<PyRef<'_, PySafetyParams>>) -> PyResult<SafetyParams> {
+    p.map_or_else(|| Ok(SafetyParams::default()), |p| p.to_core())
 }
 
 /// A per-sector bool array as a Vec, checked against the scan's number of sectors.
@@ -169,8 +177,8 @@ fn arc<'py>(
 
 /// Distance travelled before standing still from speed v: v * latency + v^2 / (2 decel).
 #[pyfunction]
-fn stopping_distance(v: f64, p: PyRef<'_, PySafetyParams>) -> f64 {
-    core::stopping_distance(v, &p.to_core())
+fn stopping_distance(v: f64, p: PyRef<'_, PySafetyParams>) -> PyResult<f64> {
+    Ok(core::stopping_distance(v, &p.to_core()?))
 }
 
 /// Arc length the centre can travel at curvature curv before coming within radius + margin of a point of
@@ -186,7 +194,7 @@ fn free_arc_length(
     Ok(core::free_arc_length(
         &rows(&points, "points")?,
         curv,
-        &p.to_core(),
+        &p.to_core()?,
         s_max,
     ))
 }
@@ -200,7 +208,7 @@ fn free_arc_lengths<'py>(
     p: PyRef<'py, PySafetyParams>,
     s_max: f64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let free = core::free_arc_lengths(&rows(&points, "points")?, &curvs, &p.to_core(), s_max);
+    let free = core::free_arc_lengths(&rows(&points, "points")?, &curvs, &p.to_core()?, s_max);
     Ok(PyArray1::from_vec(py, free))
 }
 
@@ -230,7 +238,7 @@ fn safe_command(
         v,
         w,
         &scan,
-        &params(p),
+        &safety_params(p)?,
         extra.as_deref(),
         near_known.as_deref(),
     ))

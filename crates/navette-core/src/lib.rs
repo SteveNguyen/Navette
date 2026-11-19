@@ -9,6 +9,7 @@ pub mod exploration;
 pub mod geometry;
 pub mod navigator;
 pub mod occupancy_grid;
+pub mod params;
 pub mod scan;
 pub mod state_estimation;
 pub mod velocity_smoother;

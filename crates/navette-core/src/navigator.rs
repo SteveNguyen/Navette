@@ -34,6 +34,7 @@ use crate::exploration::frontier::FrontierParams;
 use crate::exploration::frontier_explore::FrontierExplore;
 use crate::geometry::{Point2, Pose2, Vec3};
 use crate::occupancy_grid::{OccupancyGrid, OccupancyGridParams};
+use crate::params::{self, ParamError};
 use crate::scan::{FreeSpace, Scan, ShapeError};
 use crate::state_estimation::tilt_trust::TiltTrust;
 use crate::velocity_smoother::ResumeGate;
@@ -94,6 +95,22 @@ impl Default for NavigatorParams {
     }
 }
 
+impl NavigatorParams {
+    /// The parameters of every part, and finite forward_v and tilt trust parameters.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        self.safety.validate()?;
+        self.grid.validate()?;
+        self.frontier.validate()?;
+        self.explore.validate()?;
+        params::finite("NavigatorParams.forward_v", self.forward_v)?;
+        let t = &self.tilt_trust;
+        params::non_negative("TiltTrust.s0", t.s0)?;
+        params::positive("TiltTrust.tau_s", t.tau_s)?;
+        params::non_negative("TiltTrust.tol_m", t.tol_m)?;
+        params::non_negative("TiltTrust.timing_s", t.timing_s)
+    }
+}
+
 /// The result of one step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NavOut {
@@ -141,17 +158,19 @@ pub struct Navigator {
 }
 
 impl Navigator {
-    pub fn new(params: NavigatorParams) -> Self {
-        Self {
+    /// An error if a parameter is invalid ([`NavigatorParams::validate`]).
+    pub fn new(params: NavigatorParams) -> Result<Self, ParamError> {
+        params.validate()?;
+        Ok(Self {
             use_map: params.behaviour == Behaviour::Explore || params.odometry,
-            grid: OccupancyGrid::new(params.grid),
-            explore: FrontierExplore::new(params.explore.clone(), params.safety, params.frontier),
+            grid: OccupancyGrid::new(params.grid)?,
+            explore: FrontierExplore::new(params.explore.clone(), params.safety, params.frontier)?,
             tilt_trust: params.tilt_trust,
             gate: ResumeGate::new(params.resume_n),
             heading0: None,
             done_since: None,
             params,
-        }
+        })
     }
 
     pub fn params(&self) -> &NavigatorParams {
@@ -186,7 +205,8 @@ impl Navigator {
     pub fn reset(&mut self) {
         let p = &self.params;
         self.grid.reset();
-        self.explore = FrontierExplore::new(p.explore.clone(), p.safety, p.frontier);
+        self.explore = FrontierExplore::new(p.explore.clone(), p.safety, p.frontier)
+            .expect("the parameters were validated by Navigator::new");
         self.tilt_trust = p.tilt_trust;
         self.gate = ResumeGate::new(p.resume_n);
         (self.heading0, self.done_since) = (None, None);
@@ -380,6 +400,7 @@ mod tests {
             forward_v,
             ..Default::default()
         })
+        .unwrap()
     }
 
     fn step(nav: &mut Navigator, t: f64, pose: Pose2, scan_from: Pose2) -> NavOut {
@@ -394,6 +415,22 @@ mod tests {
             0.0,
             0.0,
         )
+    }
+
+    #[test]
+    fn bad_parameters_are_errors() {
+        let bad = |change: fn(&mut NavigatorParams)| {
+            let mut p = NavigatorParams::default();
+            change(&mut p);
+            Navigator::new(p).err().expect("invalid").0
+        };
+        assert!(bad(|p| p.safety.step = 0.0).starts_with("SafetyParams.step"));
+        assert!(bad(|p| p.safety.decel = 0.0).starts_with("SafetyParams.decel"));
+        assert!(bad(|p| p.grid.res = 0.0).starts_with("OccupancyGridParams.res"));
+        assert!(bad(|p| p.frontier.replan_s = f64::NAN).starts_with("FrontierParams.replan_s"));
+        assert!(bad(|p| p.explore.v_set.clear()).starts_with("ExploreParams.v_set"));
+        assert!(bad(|p| p.forward_v = f64::NAN).starts_with("NavigatorParams.forward_v"));
+        assert!(bad(|p| p.tilt_trust.tau_s = 0.0).starts_with("TiltTrust.tau_s"));
     }
 
     #[test]
@@ -476,7 +513,7 @@ mod tests {
             assert_eq!(step(&mut nav, 2.0, far, far).v, 0.0);
             assert!(step(&mut nav, 2.1, far, far).v > 0.1);
         }
-        let mut nav = Navigator::new(NavigatorParams::default());
+        let mut nav = Navigator::new(NavigatorParams::default()).unwrap();
         for k in 0..50 {
             let out = nav.step(k as f64 * 0.1, 0.1, far, &blind(far), 0.35, 0.0, 0.0, 0.0, 0.0);
             assert!(out.v == 0.0 && !out.blind_stop && out.w.is_finite());
@@ -500,7 +537,7 @@ mod tests {
     fn explores_then_finishes_after_done_for_3_s_and_reset_starts_again() {
         // a closed 1.6 x 1.6 m room: explored by looking around
         let room = (1.6, 1.6);
-        let mut nav = Navigator::new(NavigatorParams::default());
+        let mut nav = Navigator::new(NavigatorParams::default()).unwrap();
         let dt = 1.0 / 8.7;
         let mut pose = Pose2::new(0.8, 0.8, 0.0);
         let (mut v, mut w) = (0.0, 0.0);
@@ -550,7 +587,7 @@ mod tests {
 
     #[test]
     fn observe_goes_into_the_map_before_any_step() {
-        let mut nav = Navigator::new(NavigatorParams::default());
+        let mut nav = Navigator::new(NavigatorParams::default()).unwrap();
         let pose = Pose2::new(1.0, 1.5, 0.0);
         nav.observe(0.0, pose, &room_scan(pose, ROOM), 0.33);
         nav.observe(0.1, pose, &room_scan(pose, ROOM), 0.33); // forced: a keyframe again

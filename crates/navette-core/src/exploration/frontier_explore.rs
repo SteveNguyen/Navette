@@ -20,6 +20,7 @@ use crate::controller::State;
 use crate::exploration::frontier::{FrontierParams, FrontierPlanner};
 use crate::geometry::{wrap_angle, Point2, Pose2};
 use crate::occupancy_grid::OccupancyGrid;
+use crate::params::ParamError;
 use crate::scan::Scan;
 
 /// Blocked again with the target within this distance (m) of the one of the last block: the same target.
@@ -151,9 +152,14 @@ pub struct FrontierExplore {
 
 impl FrontierExplore {
     /// `params.rotate_in_place` should be true: the path often leaves sideways from where no arc is free.
-    pub fn new(params: ExploreParams, safety: SafetyParams, frontier: FrontierParams) -> Self {
+    /// An error if a parameter is invalid.
+    pub fn new(
+        params: ExploreParams,
+        safety: SafetyParams,
+        frontier: FrontierParams,
+    ) -> Result<Self, ParamError> {
         let goals = FrontierGoals {
-            planner: FrontierPlanner::new(frontier),
+            planner: FrontierPlanner::new(frontier)?,
             spin_done: params.spin_done_deg.to_radians(),
             last_plan: f64::NEG_INFINITY,
             scan: None,
@@ -161,12 +167,12 @@ impl FrontierExplore {
             fails: 0,
             fail_target: None,
         };
-        Self {
-            controller: ArcController::new(params, safety),
+        Ok(Self {
+            controller: ArcController::new(params, safety)?,
             goals,
             last_t: None,
             looked: 0.0,
-        }
+        })
     }
 
     /// Drive, Spin, Look or Done.
@@ -229,7 +235,7 @@ mod tests {
             rotate_in_place: true,
             ..Default::default()
         };
-        FrontierExplore::new(params, SafetyParams::default(), FrontierParams::default())
+        FrontierExplore::new(params, SafetyParams::default(), FrontierParams::default()).unwrap()
     }
 
     /// Open floor in view up to `floor_left` m on the left and `floor_right` m on the right.

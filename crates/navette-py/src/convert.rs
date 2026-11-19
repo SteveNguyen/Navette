@@ -4,6 +4,13 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyUntypedArray
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use navette_core::params::ParamError;
+
+/// An invalid parameter is a Python ValueError naming it.
+pub fn param_err(e: ParamError) -> PyErr {
+    PyValueError::new_err(e.0)
+}
+
 /// (N, K) float64 array -> N rows of K values (K = 3: rays, points; K = 2: planar points).
 pub fn rows<const K: usize>(a: &PyReadonlyArray2<'_, f64>, name: &str) -> PyResult<Vec<[f64; K]>> {
     if a.shape()[1] != K {

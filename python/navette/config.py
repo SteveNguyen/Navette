@@ -9,6 +9,7 @@ misspelled key is an error at load time, not a silent fallback. The `[adapter]` 
     navette.SafetyParams(**cfg.safety_params())
 """
 import dataclasses
+import math
 import os
 import tomllib
 from dataclasses import dataclass
@@ -118,6 +119,11 @@ _SECTIONS = {"robot": RobotCfg, "footprint": Footprint, "safety": Safety, "perce
              "camera": CameraCfg, "behaviour": Behaviour, "controller": ControllerCfg, "page": Page,
              "glance": Glance}
 _NUMBER = {"float": (int, float), "int": (int,), "str": (str,)}
+# Ranges: every number is finite and >= 0; these are > 0 (a zero would divide, never time out, or stop
+# nothing), and the page port is a port.
+_POSITIVE = {"safety": ("v_max", "decel", "step", "n_speeds"), "perception": ("stale_s", "imu_max_age_s"),
+             "camera": ("body_z",), "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
+             "page": ("port",), "glance": ("n_frames",)}
 
 
 def _section(name, cls, raw):
@@ -132,6 +138,12 @@ def _section(name, cls, raw):
         v = raw[key]
         if isinstance(v, bool) or not isinstance(v, _NUMBER[kind]):
             raise ValueError(f"[{name}] {key} = {v!r}: expected {kind}")
+        if kind != "str":
+            positive = key in _POSITIVE.get(name, ())
+            if not (math.isfinite(v) and (v > 0 if positive else v >= 0)):
+                raise ValueError(f"[{name}] {key} = {v!r}: must be finite and {'> 0' if positive else '>= 0'}")
+    if name == "page" and raw["port"] > 65535:
+        raise ValueError(f"[page] port = {raw['port']!r}: must be at most 65535")
     return cls(**{k: float(v) if names[k] == "float" else v for k, v in raw.items()})
 
 

@@ -35,6 +35,7 @@
 use std::f64::consts::TAU;
 
 use crate::geometry::{wrap_angle, Point2, Pose2};
+use crate::params::{self, ParamError};
 use crate::scan::Scan;
 
 /// Log-odds of one obstacle observation at full weight: ln(0.7 / 0.3).
@@ -47,6 +48,9 @@ const SUB_BEAMS: [f64; 3] = [-1.0 / 3.0, 0.0, 1.0 / 3.0];
 /// Footprint samples: rings of this many points at radii 0, 0.05, 0.1 m and the robot radius.
 const FOOTPRINT_POINTS: usize = 24;
 const FOOTPRINT_RADII: [f64; 3] = [0.0, 0.05, 0.1];
+/// Most cells per side accepted by [`OccupancyGridParams::validate`] (4096^2 cells: 64 MB of log-odds, and
+/// as much of scratch).
+pub const MAX_CELLS: usize = 4096;
 
 /// Grid parameters. The defaults are the ones tuned on Reachy Mini.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +95,37 @@ impl Default for OccupancyGridParams {
     }
 }
 
+impl OccupancyGridParams {
+    /// Cells per side: Python's round(size_m / res), ties to even.
+    fn cells(&self) -> f64 {
+        (self.size_m / self.res).round_ties_even()
+    }
+
+    /// Every value finite; res, size_m, clamp and sigma_ref > 0; size_m / res between 1 and
+    /// [`MAX_CELLS`] cells per side (res = 0 would ask for an endless array); the thresholds, ranges and
+    /// keyframe distances >= 0.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        params::positive("OccupancyGridParams.res", self.res)?;
+        params::positive("OccupancyGridParams.size_m", self.size_m)?;
+        params::positive("OccupancyGridParams.clamp", self.clamp)?;
+        params::positive("OccupancyGridParams.sigma_ref", self.sigma_ref)?;
+        params::non_negative("OccupancyGridParams.thr", self.thr)?;
+        params::non_negative("OccupancyGridParams.max_obstacle_m", self.max_obstacle_m)?;
+        params::non_negative("OccupancyGridParams.robot_radius", self.robot_radius)?;
+        params::non_negative("OccupancyGridParams.key_m", self.key_m)?;
+        params::non_negative("OccupancyGridParams.key_deg", self.key_deg)?;
+        params::non_negative("OccupancyGridParams.key_s", self.key_s)?;
+        let n = self.cells();
+        if !(1.0..=MAX_CELLS as f64).contains(&n) {
+            return Err(ParamError(format!(
+                "OccupancyGridParams: size_m / res = {} / {} gives {n} cells per side, must be in 1..={MAX_CELLS}",
+                self.size_m, self.res
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// One integrated scan, with everything needed to integrate it again.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keyframe {
@@ -127,10 +162,11 @@ pub struct OccupancyGrid {
 }
 
 impl OccupancyGrid {
-    pub fn new(params: OccupancyGridParams) -> Self {
-        // Python's round(): ties to even
-        let n = (params.size_m / params.res).round_ties_even() as usize;
-        Self {
+    /// An error if a parameter is invalid ([`OccupancyGridParams::validate`]).
+    pub fn new(params: OccupancyGridParams) -> Result<Self, ParamError> {
+        params.validate()?;
+        let n = params.cells() as usize;
+        Ok(Self {
             params,
             n,
             key_rad: params.key_deg.to_radians(),
@@ -140,7 +176,7 @@ impl OccupancyGrid {
             pending: vec![f32::NAN; n * n],
             touched: Vec::new(),
             obst: Vec::new(),
-        }
+        })
     }
 
     pub fn params(&self) -> &OccupancyGridParams {
@@ -550,6 +586,41 @@ mod tests {
             size_m: 8.0,
             ..Default::default()
         })
+        .unwrap()
+    }
+
+    #[test]
+    fn bad_parameters_are_errors() {
+        let ok = OccupancyGridParams::default();
+        assert_eq!(ok.validate(), Ok(()));
+        let nan = f64::NAN;
+        for p in [
+            OccupancyGridParams { res: 0.0, ..ok },
+            OccupancyGridParams { res: -0.05, ..ok },
+            OccupancyGridParams { res: nan, ..ok },
+            OccupancyGridParams { size_m: 0.0, ..ok },
+            OccupancyGridParams { size_m: -1.0, ..ok },
+            OccupancyGridParams { size_m: nan, ..ok },
+            OccupancyGridParams { size_m: 1e6, ..ok }, // 2e7 cells per side
+            OccupancyGridParams { res: 1e-9, ..ok },
+            OccupancyGridParams { size_m: 0.01, ..ok }, // rounds to 0 cells
+            OccupancyGridParams { clamp: 0.0, ..ok },
+            OccupancyGridParams { thr: -0.1, ..ok },
+            OccupancyGridParams { key_m: -0.1, ..ok },
+            OccupancyGridParams { key_deg: nan, ..ok },
+            OccupancyGridParams { key_s: -1.0, ..ok },
+        ] {
+            let err = OccupancyGrid::new(p).err().expect("invalid");
+            assert!(err.0.starts_with("OccupancyGridParams"), "{err}");
+        }
+        // the largest grid accepted, by its parameters only (not allocated here)
+        let big = OccupancyGridParams {
+            size_m: MAX_CELLS as f64 * 0.05,
+            ..ok
+        };
+        assert_eq!(big.validate(), Ok(()));
+        let one = OccupancyGridParams { size_m: 0.05, ..ok };
+        assert_eq!(OccupancyGrid::new(one).unwrap().n(), 1);
     }
 
     const HERE: Pose2 = Pose2 {
@@ -765,7 +836,7 @@ mod tests {
     fn blind_known_needs_the_blind_zone_observed_and_the_obstacle_in_the_map() {
         let now = box_ahead(wide(), 0.44, true);
         let none = |known: Vec<bool>| known.iter().all(|&k| !k);
-        let mut g = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut g = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         assert!(none(g.blind_known(HERE, &now, None, 0.1))); // before any update
 
         // open floor seen while driving 1 m to here: the blind zone is observed, but holds no obstacle
@@ -782,12 +853,12 @@ mod tests {
         // a box 0.3 m ahead of here, seen from 0.5 m back: the floor behind it, up to the closest visible
         // point, was hidden, so the blind segment is not all observed
         let back = Pose2::new(-0.5, 0.0, 0.0);
-        let mut g = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut g = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         update(&mut g, 0.0, back, &box_ahead(wide(), 0.8, false));
         assert!(none(g.blind_known(HERE, &now, None, 0.1)));
 
         // a box 0.42 m ahead of here, seen from 0.5 m back: observed and explained
-        let mut g = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut g = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         update(&mut g, 0.0, back, &box_ahead(wide(), 0.92, false));
         let known = g.blind_known(HERE, &now, None, 0.1);
         assert!(known[89] && known[90]); // +-1 deg

@@ -19,8 +19,11 @@ use crate::collision_monitor::{boundary_points, free_arc_lengths, stopping_dista
 use crate::controller::State;
 use crate::geometry::{wrap_angle, Pose2};
 use crate::occupancy_grid::OccupancyGrid;
+use crate::params::{self, ParamError};
 use crate::scan::Scan;
 
+/// Most yaw rate candidates (`n_w`) accepted by [`ExploreParams::validate`].
+const MAX_N_W: usize = 10_000;
 /// Range (m) of the map obstacles the arcs are checked against.
 const MAP_RANGE_M: f64 = 1.5;
 /// Applied speed (m/s) from which the robot counts as moving.
@@ -75,6 +78,39 @@ impl Default for ExploreParams {
     }
 }
 
+impl ExploreParams {
+    /// Every value finite; v_set not empty, its speeds > 0 (w / v is the arc's curvature); n_w >= 1;
+    /// clear_cap > 0; w_spin > 0 (with 0 the look-around never ends); the others >= 0, the score weights any.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        if self.v_set.is_empty() {
+            return Err(ParamError("ExploreParams.v_set: must not be empty".into()));
+        }
+        for &v in &self.v_set {
+            params::positive("ExploreParams.v_set", v)?;
+        }
+        params::count("ExploreParams.n_w", self.n_w, MAX_N_W)?;
+        params::positive("ExploreParams.clear_cap", self.clear_cap)?;
+        params::positive("ExploreParams.w_spin", self.w_spin)?;
+        for (name, value) in [
+            ("w_max", self.w_max),
+            ("horizon_s", self.horizon_s),
+            ("spin_above_deg", self.spin_above_deg),
+            ("spin_done_deg", self.spin_done_deg),
+            ("blocked_s", self.blocked_s),
+        ] {
+            params::non_negative(&format!("ExploreParams.{name}"), value)?;
+        }
+        for (name, value) in [
+            ("k_heading", self.k_heading),
+            ("k_clear", self.k_clear),
+            ("k_speed", self.k_speed),
+        ] {
+            params::finite(&format!("ExploreParams.{name}"), value)?;
+        }
+        Ok(())
+    }
+}
+
 /// Where the controller should head: the behaviour on top of it.
 pub trait GoalSource {
     /// Fixed-frame heading (rad) to steer to, at time `t` from `pose`.
@@ -119,14 +155,17 @@ pub struct ArcController {
 }
 
 impl ArcController {
-    pub fn new(params: ExploreParams, safety: SafetyParams) -> Self {
-        Self {
+    /// An error if a parameter is invalid ([`ExploreParams::validate`], [`SafetyParams::validate`]).
+    pub fn new(params: ExploreParams, safety: SafetyParams) -> Result<Self, ParamError> {
+        params.validate()?;
+        safety.validate()?;
+        Ok(Self {
             params,
             safety,
             goal: None,
             state: State::Drive,
             blocked_since: None,
-        }
+        })
     }
 
     /// Requested (v, w) at time `t` (s) from `pose`. `scan`: this frame's (None: the arcs are checked
@@ -237,10 +276,56 @@ mod tests {
 
     /// One step of a new controller toward the fixed-frame heading `goal_deg`, on an empty map.
     fn step(params: ExploreParams, goal_deg: f64, sc: &Scan, v_applied: f64) -> ((f64, f64), ArcController) {
-        let mut c = ArcController::new(params, SafetyParams::default());
-        let grid = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(goal_deg.to_radians());
         (c.step(&mut goal, 0.0, HERE, Some(sc), &grid, v_applied), c)
+    }
+
+    #[test]
+    fn bad_parameters_are_errors() {
+        let ok = ExploreParams::default;
+        assert_eq!(ok().validate(), Ok(()));
+        let nan = f64::NAN;
+        for p in [
+            ExploreParams {
+                v_set: vec![],
+                ..ok()
+            },
+            ExploreParams {
+                v_set: vec![0.1, 0.0],
+                ..ok()
+            },
+            ExploreParams {
+                v_set: vec![-0.1],
+                ..ok()
+            },
+            ExploreParams {
+                v_set: vec![nan],
+                ..ok()
+            },
+            ExploreParams { n_w: 0, ..ok() },
+            ExploreParams { w_max: -1.0, ..ok() },
+            ExploreParams { w_max: nan, ..ok() },
+            ExploreParams {
+                clear_cap: 0.0,
+                ..ok()
+            },
+            ExploreParams { w_spin: 0.0, ..ok() },
+            ExploreParams {
+                blocked_s: nan,
+                ..ok()
+            },
+            ExploreParams { k_speed: nan, ..ok() },
+        ] {
+            let err = ArcController::new(p, SafetyParams::default()).expect_err("invalid");
+            assert!(err.0.starts_with("ExploreParams."), "{err}");
+        }
+        let safety = SafetyParams {
+            step: 0.0,
+            ..Default::default()
+        };
+        assert!(ArcController::new(ok(), safety).is_err());
     }
 
     #[test]
@@ -286,8 +371,8 @@ mod tests {
 
     #[test]
     fn a_spin_ends_within_spin_done_of_the_goal() {
-        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default());
-        let grid = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(90f64.to_radians());
         let at = |deg: f64| Pose2::new(0.0, 0.0, deg.to_radians());
         assert_eq!(
@@ -353,8 +438,8 @@ mod tests {
     fn blocked_for_blocked_s_asks_for_another_goal_and_turns_to_it() {
         // a post right in front: no admissible arc ahead
         let sc = scan(|_| 0.2, 181.0, 0.15);
-        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default());
-        let grid = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goals = Blocked(0);
         for k in 0..=10 {
             assert_eq!(
@@ -372,8 +457,8 @@ mod tests {
 
     #[test]
     fn standing_still_with_a_free_arc_counts_as_blocked_too() {
-        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default());
-        let grid = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(0.0);
         let (v, _) = c.step(&mut goal, 0.0, HERE, Some(&open()), &grid, 0.0);
         assert!(v > 0.0 && c.blocked_since == Some(0.0)); // asks to go, but the base is not moving

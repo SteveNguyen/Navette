@@ -29,10 +29,17 @@
 //! libm's pow, which is not always correctly rounded (the look-ahead may differ by one ulp).
 
 use crate::geometry::Point2;
+use crate::params::{self, ParamError};
 use crate::scan::Scan;
 
 /// Below this curvature (1/m) an arc is a straight line.
 const STRAIGHT_CURV: f64 = 1e-6;
+/// Most samples ever taken along one arc. Defensive only: valid parameters give tens of samples (a look-ahead
+/// of ~1 m at step 0.02), but these functions take their parameters unchecked, and step = 0 or decel = 0
+/// (an infinite look-ahead) would otherwise loop for ever.
+const MAX_ARC_SAMPLES: usize = 100_000;
+/// Most candidate speeds (`n_speeds`) accepted by [`SafetyParams::validate`].
+const MAX_SPEEDS: usize = 10_000;
 
 /// Robot footprint and stopping model.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +81,20 @@ impl Default for SafetyParams {
 }
 
 impl SafetyParams {
+    /// Every value finite; step, decel and v_max > 0 (step = 0 or decel = 0 make the arc sampling endless);
+    /// the lengths, the latency and reverse_max >= 0; n_speeds >= 1.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        params::positive("SafetyParams.step", self.step)?;
+        params::positive("SafetyParams.decel", self.decel)?;
+        params::positive("SafetyParams.v_max", self.v_max)?;
+        params::non_negative("SafetyParams.latency", self.latency)?;
+        params::non_negative("SafetyParams.radius", self.radius)?;
+        params::non_negative("SafetyParams.margin", self.margin)?;
+        params::non_negative("SafetyParams.unseen_m", self.unseen_m)?;
+        params::non_negative("SafetyParams.reverse_max", self.reverse_max)?;
+        params::count("SafetyParams.n_speeds", self.n_speeds, MAX_SPEEDS)
+    }
+
     /// Closest a boundary point may come to the robot centre (m).
     #[inline]
     pub fn clearance(&self) -> f64 {
@@ -138,11 +159,12 @@ pub fn arc(curv: f64, s: &[f64]) -> Vec<Point2> {
 
 /// Number of arc samples looking `s_max` ahead: the length of numpy's arange(step, s_max + step, step),
 /// ceil((stop - start) / step) in floating point (so the last sample may lie up to one step past s_max).
+/// Never more than [`MAX_ARC_SAMPLES`].
 #[inline]
 fn n_samples(step: f64, s_max: f64) -> usize {
     let n = ((s_max + step - step) / step).ceil();
     if n > 0.0 {
-        n as usize
+        (n as usize).min(MAX_ARC_SAMPLES) // the cast saturates: inf (step = 0) gives usize::MAX
     } else {
         0 // also NaN
     }
@@ -317,6 +339,53 @@ mod tests {
         assert_eq!(n_samples(0.02, 0.0), 0);
         assert_eq!(n_samples(0.02, -1.0), 0);
         assert_eq!(n_samples(0.02, f64::NAN), 0);
+        // bounded whatever the parameters: step = 0, an infinite look-ahead (decel = 0)
+        assert_eq!(n_samples(0.0, 0.5), MAX_ARC_SAMPLES);
+        assert_eq!(n_samples(0.02, f64::INFINITY), MAX_ARC_SAMPLES);
+        assert_eq!(n_samples(-0.02, 0.5), 0);
+    }
+
+    #[test]
+    fn bad_parameters_are_errors_and_cannot_hang() {
+        let ok = SafetyParams::default();
+        assert_eq!(ok.validate(), Ok(()));
+        let nan = f64::NAN;
+        let bad = [
+            SafetyParams { step: 0.0, ..ok },
+            SafetyParams { step: -0.02, ..ok },
+            SafetyParams { step: nan, ..ok },
+            SafetyParams { decel: 0.0, ..ok },
+            SafetyParams {
+                decel: f64::INFINITY,
+                ..ok
+            },
+            SafetyParams { latency: -0.1, ..ok },
+            SafetyParams { latency: nan, ..ok },
+            SafetyParams { radius: -0.1, ..ok },
+            SafetyParams { margin: nan, ..ok },
+            SafetyParams { unseen_m: -1.0, ..ok },
+            SafetyParams { v_max: 0.0, ..ok },
+            SafetyParams {
+                reverse_max: -0.1,
+                ..ok
+            },
+            SafetyParams { n_speeds: 0, ..ok },
+            SafetyParams {
+                n_speeds: usize::MAX,
+                ..ok
+            },
+        ];
+        let wall = scan(|_| 0.3, 38.0);
+        for p in bad {
+            let err = p.validate().expect_err("invalid");
+            assert!(err.0.starts_with("SafetyParams."), "{err}");
+            // unchecked, the functions still return: the sampling is bounded
+            if p.n_speeds <= MAX_SPEEDS {
+                safe_command(0.15, 0.3, &wall, &p, None, None);
+                free_arc_length(&[[0.5, 0.0]], 0.0, &p, None);
+                free_arc_lengths(&[[0.5, 0.0]], &[0.0, 1.0], &p, 1.0);
+            }
+        }
     }
 
     #[test]

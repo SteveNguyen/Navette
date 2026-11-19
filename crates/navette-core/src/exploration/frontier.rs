@@ -31,6 +31,7 @@ use std::f64::consts::SQRT_2;
 
 use crate::geometry::{wrap_angle, Point2, Pose2};
 use crate::occupancy_grid::OccupancyGrid;
+use crate::params::{self, ParamError};
 
 /// Predecessor of a cell [`dijkstra`] did not reach, and of the start.
 pub const NO_PRED: u32 = u32::MAX;
@@ -88,6 +89,31 @@ impl Default for FrontierParams {
             ban_s: 60.0,
             ban_r: 0.5,
         }
+    }
+}
+
+impl FrontierParams {
+    /// Every value finite (a NaN compared with a timer or a distance silently disables the check);
+    /// soft_m and target_timeout_s > 0; the others >= 0.
+    pub fn validate(&self) -> Result<(), ParamError> {
+        params::positive("FrontierParams.soft_m", self.soft_m)?;
+        params::positive("FrontierParams.target_timeout_s", self.target_timeout_s)?;
+        for (name, value) in [
+            ("clear", self.clear),
+            ("soft_k", self.soft_k),
+            ("blind", self.blind),
+            ("min_frontier_m", self.min_frontier_m),
+            ("min_unknown_m2", self.min_unknown_m2),
+            ("turn_k", self.turn_k),
+            ("replan_s", self.replan_s),
+            ("lookahead", self.lookahead),
+            ("keep_ratio", self.keep_ratio),
+            ("ban_s", self.ban_s),
+            ("ban_r", self.ban_r),
+        ] {
+            params::non_negative(&format!("FrontierParams.{name}"), value)?;
+        }
+        Ok(())
     }
 }
 
@@ -362,8 +388,10 @@ pub struct FrontierPlanner {
 }
 
 impl FrontierPlanner {
-    pub fn new(params: FrontierParams) -> Self {
-        Self {
+    /// An error if a parameter is invalid ([`FrontierParams::validate`]).
+    pub fn new(params: FrontierParams) -> Result<Self, ParamError> {
+        params.validate()?;
+        Ok(Self {
             params,
             path: None,
             target: None,
@@ -371,7 +399,7 @@ impl FrontierPlanner {
             done: false,
             banned: Vec::new(),
             frontier: Vec::new(),
-        }
+        })
     }
 
     pub fn path(&self) -> Option<&[Point2]> {
@@ -625,6 +653,32 @@ mod tests {
     }
 
     #[test]
+    fn bad_parameters_are_errors() {
+        let ok = FrontierParams::default();
+        assert_eq!(ok.validate(), Ok(()));
+        let nan = f64::NAN;
+        for p in [
+            FrontierParams { replan_s: nan, ..ok },
+            FrontierParams { replan_s: -1.0, ..ok },
+            FrontierParams { lookahead: nan, ..ok },
+            FrontierParams { soft_m: 0.0, ..ok },
+            FrontierParams { clear: -0.1, ..ok },
+            FrontierParams {
+                blind: f64::INFINITY,
+                ..ok
+            },
+            FrontierParams {
+                target_timeout_s: 0.0,
+                ..ok
+            },
+            FrontierParams { ban_r: nan, ..ok },
+        ] {
+            let err = FrontierPlanner::new(p).expect_err("invalid");
+            assert!(err.0.starts_with("FrontierParams."), "{err}");
+        }
+    }
+
+    #[test]
     fn frontier_needs_an_unknown_4_neighbour_and_a_minimum_size() {
         // '.' free, '#' obstacle, ' ' unknown
         let rows = ["##### ", "#...# ", "#.... ", "#...# ", "##### "];
@@ -714,7 +768,7 @@ mod tests {
     #[test]
     fn plans_through_the_door() {
         let g = room(0.8);
-        let mut pl = FrontierPlanner::new(FrontierParams::default());
+        let mut pl = FrontierPlanner::new(FrontierParams::default()).unwrap();
         let pose = Pose2::new(-0.5, 0.5, 0.0);
         pl.plan(0.0, pose, &g, &[], 0.0);
         assert!(!pl.done());
@@ -733,7 +787,7 @@ mod tests {
     #[test]
     fn closed_or_too_narrow_means_done() {
         for door_w in [0.0, 0.25] {
-            let mut pl = FrontierPlanner::new(FrontierParams::default());
+            let mut pl = FrontierPlanner::new(FrontierParams::default()).unwrap();
             pl.plan(0.0, Pose2::default(), &room(door_w), &[], 0.0);
             assert!(pl.done() && pl.path().is_none() && pl.target().is_none());
             assert_eq!(pl.heading(Pose2::default()), None);
@@ -742,8 +796,8 @@ mod tests {
 
     #[test]
     fn nothing_known_or_robot_outside_gives_no_plan() {
-        let mut pl = FrontierPlanner::new(FrontierParams::default());
-        let empty = OccupancyGrid::new(OccupancyGridParams::default());
+        let mut pl = FrontierPlanner::new(FrontierParams::default()).unwrap();
+        let empty = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         pl.plan(0.0, Pose2::default(), &empty, &[], 0.0);
         assert!(!pl.done() && pl.path().is_none());
         pl.plan(0.0, Pose2::new(10.0, 0.0, 0.0), &room(0.8), &[], 0.0);
@@ -756,7 +810,8 @@ mod tests {
         let mut pl = FrontierPlanner::new(FrontierParams {
             target_timeout_s: 5.0,
             ..Default::default()
-        });
+        })
+        .unwrap();
         pl.plan(0.0, Pose2::default(), &g, &[], 0.0);
         let first = pl.target().unwrap();
         pl.plan(6.0, Pose2::default(), &g, &[], 0.0);

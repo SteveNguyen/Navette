@@ -12,7 +12,8 @@ pub(crate) fn test_room(door_w: f64) -> crate::occupancy_grid::OccupancyGrid {
     let mut g = OccupancyGrid::new(OccupancyGridParams {
         size_m: 6.0,
         ..Default::default()
-    });
+    })
+    .unwrap();
     let n = g.n();
     let l: Vec<f32> = (0..n * n)
         .map(|c| {
