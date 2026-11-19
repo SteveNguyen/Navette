@@ -36,7 +36,8 @@ JPEG_QUALITY = 90
 STATE_POLL_HZ = 200.0
 GLANCE_MOVE_S = 0.5     # head move duration of a glance (each way)
 ANTENNA_REST = [-0.1745, 0.1745]  # rad, the SDK's rest position of the antennas
-PUSH_RAD = 0.4          # an antenna more than ~23 deg from rest is pushed
+HEAD_TOL_DEG = 5.0     # largest measured error of the navigation head pose before a run is refused
+PUSH_RAD = 0.4         # an antenna more than ~23 deg from rest is pushed
 MASK_W, MASK_H = 320, 192  # floor model input and output size
 MEAN = np.array([0.485, 0.456, 0.406], np.float32) * 255  # RGB, ImageNet (the floor model's preprocessing)
 STD = np.array([0.229, 0.224, 0.225], np.float32) * 255
@@ -224,6 +225,13 @@ def set_nav_head(mini, pitch_deg, log):
     time.sleep(1.0)  # let the head settle
     r, p, y = measured_rpy(mini)
     log(f"head: measured r/p/y {r:.1f}/{p:.1f}/{y:.1f} deg")
+    # With the motors disabled (robot not woken up) goto_target does nothing and raises nothing: the head hangs
+    # where it is and the camera may see the robot's own body, which reads as an obstacle at the image bottom.
+    # Seen on the robot: commanded 15 deg down, measured pitch -0.3, yaw 13. Refuse to start rather than navigate
+    # on that view. The tolerance leaves room for this head's weak-motor sag (about 1 deg).
+    if abs(p - pitch_deg) > HEAD_TOL_DEG or abs(r) > HEAD_TOL_DEG or abs(y) > HEAD_TOL_DEG:
+        raise RuntimeError(f"head not at the navigation pose: measured r/p/y {r:.1f}/{p:.1f}/{y:.1f} deg, "
+                           f"commanded 0/{pitch_deg:.1f}/0 (motors disabled? wake the robot up first)")
     return [float(r), float(p), float(y)]
 
 
