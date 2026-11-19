@@ -22,7 +22,8 @@ What the contract's calls mean on this base (firmware docs/nav-link-api.md, sect
              our link's controller bit (our nv are then dropped by the base). So a tipped base, the dead-man,
              the firmware's estop (e.g. its runaway rule: both wheels past 16 rad/s for 0.25 s), a stop
              procedure started by the other link, a low-battery sit-down all halt the controller.
-             STARTING until the first Balancing [nav], then DRIVING.
+             STARTING until the first Balancing [nav] (after a stand-up: until its settle roll is over, see
+             SETTLE_MIN_S), then DRIVING.
              Also the periodic tick: one clock-sync round trip (nq) per SYNC_S.
   odometry() pose from the wheel angles and the base's gyro (poussah_link.Odometry); v from the wheel speeds,
              w from the gyro (gz) once its offset is known, else from the wheel speeds.
@@ -43,6 +44,11 @@ NAV_STALE_S = 0.3       # no [nav] for this long during a session: FAULT
 STOP_TIMEOUT_S = 3.0    # stop -> S1 at the latest, wheels still or not
 STILL_MS = 0.05         # wheel rim speed (m/s) under which a wheel counts as still
 STILL_LINES = 3         # consecutive post-stop [nav] lines with still wheels: the base has stopped
+# After a stand-up (S0) the base with the Mini on rolls FORWARD 11-15 cm by itself during its first ~2 s of
+# balancing, whatever nv says (firmware floor test). STARTING (zero commands only) lasts until it has balanced
+# SETTLE_MIN_S with still wheels on the latest [nav], or SETTLE_MAX_S anyway; the navigator only drives after.
+# The roll itself is not under the collision monitor: start with ~0.3 m clear ahead.
+SETTLE_MIN_S, SETTLE_MAX_S = 2.0, 4.0
 WHEEL_R_DEFAULT = 0.0444  # m, the firmware's default wheel radius, if no [hello] gave r
 SYNC_S = 1.0            # BaseLink.sync() period
 
@@ -69,6 +75,7 @@ class PoussahBase:
         self._t_stop = clock()   # time of the last stop()
         self._seen = None        # last [nav] counted by park() (each line counted once)
         self._still = 0          # consecutive post-stop [nav] lines with still wheels
+        self._balancing_since = None  # first Balancing [nav] of this session (settle after a stand-up)
         self._next_sync = clock()
 
     # --- contract
@@ -98,6 +105,7 @@ class PoussahBase:
                 raise StartRefused(why)
         self._drain_events()  # events from before START are history (shown in the log)
         self._session, self._ready, self._fault, self._stood = True, False, None, False
+        self._balancing_since = None
         self.link.resume()
         self.link.send_velocity(0.0, 0.0)  # the claim
         if nav.st == pl.STOPPED:
@@ -156,13 +164,24 @@ class PoussahBase:
         if silent:
             return f"no [nav] for {NAV_STALE_S} s"
         if not self._ready:
-            self._ready = self.dry_run or nav.st == pl.BALANCING
+            self._ready = self.dry_run or self._settled(nav)
             return None
         if not self.dry_run and nav.st != pl.BALANCING:
             return f"[nav] st {nav.st} while driving"
         if not self.dry_run and self.link.is_controller(nav) is False:
             return "this link is not the base's controller ([nav] f)"
         return None
+
+    def _settled(self, nav):
+        """Balancing, and, if this session stood the base up, past its settle roll (SETTLE_MIN_S / MAX_S)."""
+        if nav.st != pl.BALANCING:
+            return False
+        if not self._stood:  # it was already balancing at START: no stand-up roll to wait for
+            return True
+        if self._balancing_since is None:
+            self._balancing_since = nav.t_recv
+        dt = nav.t_recv - self._balancing_since
+        return dt >= SETTLE_MAX_S or (dt >= SETTLE_MIN_S and wheels_still(nav, self._wheel_r()))
 
     def _wheel_r(self):
         h = self.link.hello

@@ -91,6 +91,11 @@ class Rig:
         for _ in range(n):
             self.step(st=st)
 
+    def settle(self):
+        """Balancing with still wheels until the stand-up's settle roll is over (pb.SETTLE_MIN_S)."""
+        for _ in range(int(pb.SETTLE_MIN_S / 0.05) + 2):
+            self.step(st=2)
+
     def drive(self):
         """START from Balancing and one nv: DRIVING."""
         assert self.ctrl.start()[0]
@@ -135,10 +140,32 @@ def test_start_from_sitting_stands_up_then_drives_capped():
     r.feed("[event] t=1 ev=state st=1 from=0 to=1")  # the stand-up's own state changes: not a watchdog
     r.step(st=1)
     r.feed("[event] t=2 ev=state st=2 from=1 to=2")
-    r.step(st=2)
+    r.settle()
     assert r.ctrl.state == lr.DRIVING
     r.step(nav_out=out(0.3, 0.6))
     assert r.sent()[-1].startswith("nv0.15,0.3,") and r.ctrl.sent == pytest.approx((0.15, 0.3))
+
+
+def test_after_a_stand_up_driving_waits_for_the_settle_roll():
+    """With the Mini on, the base rolls forward 11-15 cm by itself during its first ~2 s of balancing: only
+    zero commands until it has balanced SETTLE_MIN_S with still wheels, or SETTLE_MAX_S if they never are."""
+    r = Rig(st=0)
+    r.ctrl.start()
+    r.step(st=2)
+    n = 0
+    while r.ctrl.state == lr.STARTING:  # balancing, still wheels
+        r.step(st=2, nav_out=out())
+        n += 1
+    assert n * 0.05 == pytest.approx(pb.SETTLE_MIN_S, abs=0.06) and r.ctrl.state == lr.DRIVING
+    assert all(s.startswith("nv0,0,") for s in r.sent()[2:-1])  # zeros while settling
+    m = Rig(st=0)
+    m.ctrl.start()
+    m.step(st=2)
+    n = 0
+    while m.ctrl.state == lr.STARTING:  # rolling all along (wheels at 2 rad/s): the time limit decides
+        m.step(st=2, wl=-2.0, wr=-2.0, nav_out=out())
+        n += 1
+    assert n * 0.05 == pytest.approx(pb.SETTLE_MAX_S, abs=0.06) and m.ctrl.state == lr.DRIVING
 
 
 def test_stand_timeout_halts():
@@ -202,8 +229,11 @@ def test_hold_streamed_while_starting():
     assert r.ctrl.state == lr.STARTING
     assert r.sent() == ["nv0,0,1", "S0"] + [f"nv0,0,{k}" for k in range(2, 7)]
     assert [c[5] for c in r.cmds if c[2] == "command"] == [2, 3, 4, 5, 6]  # (seq 1: the claim inside start)
-    r.step(st=2)  # Balancing: DRIVING, no hold on that tick (no navigator output yet: nothing)
-    assert r.ctrl.state == lr.DRIVING and r.sent()[-1] == "nv0,0,6"
+    r.settle()  # Balancing, settle roll over: DRIVING; zeros until then, nothing after (no navigator output yet)
+    assert r.ctrl.state == lr.DRIVING
+    s = r.sent()
+    assert all(x.startswith("nv0,0,") for x in s[2:])
+    assert len(r.sent()) == len(s)
 
 
 def test_own_owner_event_ignored_while_starting_and_driving():
@@ -213,7 +243,7 @@ def test_own_owner_event_ignored_while_starting_and_driving():
     r.feed("[event] t=1 ev=owner st=0 link=ble")
     r.step(st=1)
     assert r.ctrl.state == lr.STARTING
-    r.step(st=2)
+    r.settle()
     r.step(nav_out=out())
     r.feed("[event] t=2 ev=owner st=2 link=ble")
     r.step(nav_out=out())
@@ -566,6 +596,9 @@ def test_status_states_and_low_battery():
     assert r.base.status() == itf.BaseStatus(itf.STOPPED, "", True)
     r.base.start()
     assert r.base.status().state == itf.STARTING
+    r.nav(2)
+    assert r.base.status().state == itf.STARTING  # stood up: its settle roll first
+    r.clock.t += pb.SETTLE_MIN_S
     r.nav(2)
     assert r.base.status().state == itf.DRIVING
     r.feed("[event] t=5 ev=low_battery_sitdown st=2")
