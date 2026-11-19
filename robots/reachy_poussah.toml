@@ -15,6 +15,11 @@ margin = 0.05
 # travelled; least squares: lag 0.63 s (the base rolls on while the balance controller leans back), decel
 # 0.64 m/s^2, residuals 1 mm. (The base alone gave 0.13 s / 0.16 m/s^2, which under-predicts with the Mini on.)
 # Planned stop with stale_s = 0.9: 0.25 m at 0.15 m/s, 0.34 m at 0.2, 0.53 m at 0.3.
+# Why the lag: the balancer pulls the base toward a position goal advancing at the commanded speed; a stop
+# freezes the goal and the base catches up the lag it had (firmware), ~v x 0.63 s at steady speed. Right after a
+# start the base is slower to follow and the lag can be larger (8 cm after a 0.75 s burst at 0.1 m/s, measured),
+# which the margin and the spare in stale_s (outputs are ~0.4 s old typically, 0.9 s allowed) absorb at these
+# speeds; to re-check if v_max goes up.
 v_max = 0.4
 decel = 0.64
 base_lag_s = 0.63

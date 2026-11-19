@@ -44,10 +44,11 @@ NAV_STALE_S = 0.3       # no [nav] for this long during a session: FAULT
 STOP_TIMEOUT_S = 3.0    # stop -> S1 at the latest, wheels still or not
 STILL_MS = 0.05         # wheel rim speed (m/s) under which a wheel counts as still
 STILL_LINES = 3         # consecutive post-stop [nav] lines with still wheels: the base has stopped
-# After a stand-up (S0) the base with the Mini on rolls FORWARD 11-15 cm by itself during its first ~2 s of
-# balancing, whatever nv says (firmware floor test). STARTING (zero commands only) lasts until it has balanced
-# SETTLE_MIN_S with still wheels on the latest [nav], or SETTLE_MAX_S anyway; the navigator only drives after.
-# The roll itself is not under the collision monitor: start with ~0.3 m clear ahead.
+# After a stand-up (S0) the base with the Mini on lurches ~14 cm BACK (the wheels roll under the centre of mass
+# to lift it from its back rest), then sways ~14 cm FORWARD during its first ~2 s of balancing, whatever nv says
+# (firmware and navigation floor tests). STARTING (zero commands only) lasts until it has balanced SETTLE_MIN_S
+# with still wheels on the latest [nav], or SETTLE_MAX_S anyway; the navigator only drives after. The sway is
+# not under the collision monitor: start with ~0.3 m clear ahead and behind.
 SETTLE_MIN_S, SETTLE_MAX_S = 2.0, 4.0
 WHEEL_R_DEFAULT = 0.0444  # m, the firmware's default wheel radius, if no [hello] gave r
 SYNC_S = 1.0            # BaseLink.sync() period
