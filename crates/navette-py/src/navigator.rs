@@ -102,7 +102,7 @@ impl PyNavOut {
 ///               margin); 0 = none
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
 /// centres, path and target in the fixed frame, for display; safety, behaviour, odometry, resume_n,
-/// forward_v, resume_margin as given.
+/// forward_v, resume_margin as given; blocks: recovery turns started so far.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
 /// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
@@ -257,6 +257,12 @@ impl PyNavigator {
     #[getter]
     fn forward_v(&self) -> f64 {
         self.inner.params().forward_v
+    }
+
+    /// Blocks (recovery turns started) of the exploration behaviour since the start or the last reset.
+    #[getter]
+    fn blocks(&self) -> u32 {
+        self.inner.blocks()
     }
 
     /// One step -> NavOut. t time (s), dt since the last step; pose (x, y, theta) in the fixed frame; scan:

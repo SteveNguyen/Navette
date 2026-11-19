@@ -216,6 +216,11 @@ impl Navigator {
         self.explore.goals.planner.target()
     }
 
+    /// Blocks (recovery turns started) of the exploration behaviour since the start or the last reset.
+    pub fn blocks(&self) -> u32 {
+        self.explore.controller.blocks
+    }
+
     /// Forget the map and the behaviour's state: the robot was moved by hand, the old poses mean nothing.
     pub fn reset(&mut self) {
         let p = &self.params;

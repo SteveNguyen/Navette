@@ -9,10 +9,17 @@ what the Python prototype reached there:
   - a stop caused by the never-seen blind zone is flagged, and a glance clears it;
   - following a box that moves away step by step, the restart hysteresis (resume_margin) turns the sub-second
     start-stop bursts into fewer, longer ones (not a golden: the prototype had none).
+  - in a 1 m corridor with a turn and clutter, with the reference robot's config and its latency (commands
+    0.46 s late, yaw rate lagging 0.2 s, speeds capped as the runtime does), the exploration switches of
+    [explore] (near_known, latched turns, progress-based blocks, replanned recovery) turn less in place and
+    reverse their turns less than the prototype's behaviour, with no collision and the same coverage.
 
 Unlike tests/test_navigator_golden.py (recorded inputs replayed), the loop is closed here: a different command
 changes every later frame.
 """
+
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -151,3 +158,78 @@ def test_restart_hysteresis_avoids_short_bursts():
     assert 2 <= len(hyst) < len(plain) / 2 and hyst.min() >= 1.0, hyst
     # and it keeps up with the box: within the 10 cm it waits for
     assert hyst_run["travelled"] > plain_run["travelled"] - 0.1
+
+
+# ------------------------------------------------------------------ the exploration switches, with latency
+
+ROBOT_TOML = Path(__file__).parents[1] / "robots" / "reachy_poussah.toml"
+# the [explore] switches at the core's defaults: the prototype's behaviour
+PROTOTYPE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0, "blocked_s": 1.0,
+             "blocked_progress": False, "recover_replan": False, "recover_hold_s": 0.0}
+SWITCHES = {"A": ("near_known",), "B": ("spin_flip_deg", "spin_lead_s", "spin_accel"),
+            "D": ("blocked_s", "blocked_progress"), "C": ("recover_replan", "recover_hold_s")}
+DELAY = 4  # frames: commands reach the base ~0.46 s after their frame (the robot: 0.4-0.9 s)
+W_LAG_S = 0.2  # s, the yaw rate's first-order lag
+
+
+def corridor():
+    """An L-shaped corridor 1 m wide (4.5 m, a left turn, 3 m) into a 3 x 2 m room; small boxes (12 cm: bottles,
+    shoes) along the walls, and one in the room. Start at its closed end, facing along it."""
+    outline = sim2d.polygon((0, 0), (4.5, 0), (4.5, 4.0), (5.5, 4.0), (5.5, 6.0), (2.5, 6.0), (2.5, 4.0), (3.5, 4.0),
+                            (3.5, 1.0), (0, 1.0))
+    s = 0.12
+    clutter = [sim2d.rect(1.6, 0.0, 1.6 + s, s), sim2d.rect(2.7, 1.0 - s, 2.7 + s, 1.0),
+               sim2d.rect(4.5 - s, 2.0, 4.5, 2.0 + s), sim2d.rect(3.5, 3.0, 3.5 + s, 3.0 + s),
+               sim2d.rect(4.2, 5.2, 4.5, 5.5)]
+    return np.vstack([outline, *clutter]), (0.5, 0.5, 0.0)
+
+
+def explore_corridor(switches, steps=2000, seed=1):
+    """The reference robot's navigator (loop.new_navigator) with these [explore] switches in the corridor: noisy
+    ranges, the camera's blind zone (floor seen from 0.47 m), DELAY and W_LAG_S, commands capped as the runtime's
+    controller does (cap_speed to controller.v_max, w_max). Returns the metrics until finished (or `steps`)."""
+    from navette import config
+    from navette.runtime import loop
+    from navette.runtime.controller import cap_speed
+
+    cfg = config.load(ROBOT_TOML)
+    cfg = cfg.replace("explore", **switches)
+    nav = loop.new_navigator(cfg, "explore", cfg.behaviour.forward_v, True)
+    sim = sim2d.Sim(*corridor(), seed=seed, noise=0.01, w_lag_s=W_LAG_S)
+    cmds = []
+
+    def step(t, dt, pose, scan, cam_h, a, v, w, v_prev):
+        out = nav.step(t, dt, pose, Scan(**scan), cam_h, a, v, w, v_prev)
+        v, w = cap_speed(out.v, out.w, cfg.controller.v_max, cfg.controller.w_max)
+        cmds.append((v, w))
+        return SimpleNamespace(v=v, w=w, finished=out.finished, blind_stop=out.blind_stop)
+
+    _, summary = sim2d.run(sim, step, steps=steps, delay=DELAY)
+    n = len(cmds) if summary["finished_at"] is None else summary["finished_at"] + 1
+    turns = [np.sign(w) for v, w in cmds[:n] if v == 0.0 and w != 0.0]  # in place
+    return dict(reversals=int(sum(a != b for a, b in zip(turns, turns[1:]))), spin=len(turns) / n,
+                blocks=nav.blocks, free=int(nav.grid.masks()[1].sum()),
+                finished_s=None if summary["finished_at"] is None else summary["finished_at"] * sim2d.DT,
+                collided=summary["collided"], min_clearance=summary["min_clearance"])
+
+
+def test_exploration_switches_turn_less_in_a_cluttered_corridor_with_latency():
+    """Off (the core's defaults, the prototype's behaviour) against on (the reference robot's config). Measured
+    when this was written: reversals 8 -> 3, time turning in place 39 % -> 16 %, blocks 6 -> 0, free cells
+    4850 -> 4858, finished in 137 -> 171 s (on drives more: 17 m instead of 11), no collision."""
+    off, on = explore_corridor(PROTOTYPE), explore_corridor({})
+    print(f"\noff {off}\non  {on}")
+    assert not off["collided"] and not on["collided"]
+    assert on["min_clearance"] > 0.13 + 0.05  # the collision monitor's clearance (radius + margin) held
+    assert on["reversals"] < off["reversals"] and on["spin"] < off["spin"]
+    assert on["blocks"] < off["blocks"]
+    assert on["free"] >= 0.95 * off["free"]
+    assert off["finished_s"] is not None and on["finished_s"] is not None
+
+
+@pytest.mark.parametrize("group", SWITCHES)
+def test_each_exploration_switch_alone_is_collision_free(group):
+    switches = {k: v for k, v in PROTOTYPE.items() if k not in SWITCHES[group]}  # this group as configured
+    r = explore_corridor(switches)
+    assert not r["collided"] and r["min_clearance"] > 0.18, r
+    assert r["free"] >= 0.95 * explore_corridor(PROTOTYPE)["free"], r

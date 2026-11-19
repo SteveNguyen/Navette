@@ -62,7 +62,9 @@ near_known = true
 # (or the robot overshot). Its end is tested on the heading spin_lead_s ahead (heading + measured yaw rate x
 # spin_lead_s): the command takes effect ~0.4-0.9 s after the frame (outputs ~0.4 s old typically, see
 # [perception]), turning at ~0.43 rad/s. spin_accel / spin_w_min: slow down before the end, |w| =
-# min(w_spin, max(spin_w_min, sqrt(2 spin_accel angle))).
+# min(w_spin, max(spin_w_min, sqrt(2 spin_accel angle))). With controller.w_max = 0.5 this only acts within 14 deg
+# of the goal, inside spin_done_deg (20): today it changes nothing (2-D simulator, the corridor of
+# tests/test_closed_loop.py); it matters if w_max goes up or spin_done_deg down. The lead does the work.
 spin_flip_deg = 45.0
 spin_lead_s = 0.5
 spin_accel = 0.5

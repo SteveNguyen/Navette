@@ -264,6 +264,8 @@ pub struct ArcController {
     pub turn: Option<Turn>,
     /// With `blocked_progress`: the time and pose of the last progress (None: from the next step on).
     pub progress: Option<(f64, Pose2)>,
+    /// Blocks so far (recoveries started), for logs and tests.
+    pub blocks: u32,
 }
 
 impl ArcController {
@@ -279,6 +281,7 @@ impl ArcController {
             blocked_since: None,
             turn: None,
             progress: None,
+            blocks: 0,
         })
     }
 
@@ -375,6 +378,7 @@ impl ArcController {
         }
         if self.blocked_since.is_some_and(|since| t - since > p.blocked_s) {
             // this way is blocked: pick another goal and turn to it
+            self.blocks += 1;
             goals.on_blocked(t, pose);
             self.blocked_since = None;
             if p.blocked_progress {

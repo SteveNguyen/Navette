@@ -83,14 +83,16 @@ def scan_arrays(seen_idx, floor, closest, max_range, near_tol):
 
 class Sim:
     def __init__(self, walls, pose, seed=0, noise=0.0, radius=0.13, lag_s=0.15, fov_deg=35.0, closest=0.47,
-                 max_range=2.5, near_tol=0.05):
+                 max_range=2.5, near_tol=0.05, w_lag_s=None):
         """noise: range noise, standard deviation = noise x range^2 (m; 0.01: 1 cm at 1 m, 4 cm at 2 m).
-        lag_s: time constant of the base's response to a command."""
+        lag_s: time constant of the base's response to a command; w_lag_s: the yaw rate's own, if given (None:
+        lag_s for both)."""
         self.walls = np.asarray(walls, float)
         self.pose = np.array(pose, float)
         self.v = self.w = 0.0  # current speed (m/s) and yaw rate (rad/s)
         self.rng = np.random.default_rng(seed)
         self.noise, self.radius, self.lag_s = noise, radius, lag_s
+        self.w_lag_s = lag_s if w_lag_s is None else w_lag_s
         self.fov_deg, self.closest, self.max_range, self.near_tol = fov_deg, closest, max_range, near_tol
 
     def ray_ranges(self, angles):
@@ -125,9 +127,10 @@ class Sim:
     def step(self, v_cmd, w_cmd, dt):
         """Advance by dt (s) under the command (m/s, rad/s). Returns the forward acceleration (m/s^2)."""
         k = 1.0 - math.exp(-dt / self.lag_s)
+        k_w = k if self.w_lag_s == self.lag_s else 1.0 - math.exp(-dt / self.w_lag_s)
         v_old = self.v
         self.v += k * (v_cmd - self.v)
-        self.w += k * (w_cmd - self.w)
+        self.w += k_w * (w_cmd - self.w)
         self.pose[2] += self.w * dt
         self.pose[0] += self.v * dt * math.cos(self.pose[2])
         self.pose[1] += self.v * dt * math.sin(self.pose[2])
@@ -151,10 +154,11 @@ GLANCE_CAM_H, GLANCE_CLOSEST, GLANCE_RANGE, GLANCE_FRAMES = 0.33, 0.15, 0.6, 2
 GLANCE_AGAIN_M = 0.2  # no second glance from the same place
 
 
-def run(sim, step, observe=None, steps=400, dt=DT, extra_steps=3):
+def run(sim, step, observe=None, steps=400, dt=DT, extra_steps=3, delay=0):
     """Closed loop: at each frame, `step(t, dt, pose, scan, cam_h, a, v, w, v_prev)` gets the simulator's
     pose (perfect odometry), scan (the dict of Sim.scan) and measured motion, and returns an object with
     v, w (the command, applied until the next frame), finished and blind_stop.
+    delay: the base gets each command this many frames late (perception-to-command latency; 0: at once).
     observe(t, pose, scan, cam_h), if given, gets the frames of a head glance (looking down, robot held
     still), taken when a step reports blind_stop and the robot has moved GLANCE_AGAIN_M since the last one.
     Stops after `steps` steps, or `extra_steps` steps after the first one that reports finished.
@@ -165,10 +169,12 @@ def run(sim, step, observe=None, steps=400, dt=DT, extra_steps=3):
     a = v_prev = 0.0
     glanced_at, finished_at, stop_at = None, None, steps  # glanced_at: position of the last glance
     min_clearance, travelled = sim.clearance(), 0.0
+    late = [(0.0, 0.0)] * delay  # commands on their way to the base, oldest first
 
     def advance(v_cmd, w_cmd):
         nonlocal a, min_clearance, travelled
-        a = sim.step(v_cmd, w_cmd, dt)
+        late.append((v_cmd, w_cmd))
+        a = sim.step(*late.pop(0), dt)
         min_clearance = min(min_clearance, sim.clearance())
         travelled += abs(sim.v) * dt
 
