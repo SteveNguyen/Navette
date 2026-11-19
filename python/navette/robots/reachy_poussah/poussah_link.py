@@ -75,6 +75,8 @@ class Nav:
     f: int        # F_* bits
     gz: float | None = None      # rad/s yaw rate, > 0 counter-clockwise, offset removed once f & F_GZ_OK;
                                  # None on a firmware without it
+    lag: float | None = None     # m, signed (forward > 0): what the base still owes its position goal, i.e. the
+                                 # distance it still travels when commands go to 0, before braking; None if absent
     t_recv: float | None = None  # host monotonic when the line arrived (filled by BaseLink)
     t_host: float | None = None  # `t` mapped to host monotonic (None until the first nq round trip)
 
@@ -102,7 +104,8 @@ class Hello:
 
 _LINE = re.compile(r"^\[(\w+)\]\s*(.*)$")
 _KV = re.compile(r'(\w+)=("[^"]*"|\S+)')
-_NAV_FIELDS = [f for f in fields(Nav) if f.name not in ("gz", "t_recv", "t_host")]  # required keys
+_NAV_OPTIONAL = ("gz", "lag")  # keys of recent firmware only
+_NAV_FIELDS = [f for f in fields(Nav) if f.name not in _NAV_OPTIONAL + ("t_recv", "t_host")]  # required keys
 
 
 def _value(s):
@@ -126,8 +129,8 @@ def parse_line(text):
     kind, raw = m.group(1), dict(_KV.findall(m.group(2)))
     try:
         if kind == "nav":
-            gz = float(raw["gz"]) if "gz" in raw else None
-            return Nav(**{f.name: f.type(raw[f.name]) for f in _NAV_FIELDS}, gz=gz)
+            opt = {k: float(raw[k]) for k in _NAV_OPTIONAL if k in raw}
+            return Nav(**{f.name: f.type(raw[f.name]) for f in _NAV_FIELDS}, **opt)
         if kind == "event":
             details = {k: _value(v) for k, v in raw.items() if k not in ("t", "ev", "st")}
             return Event(int(raw["t"]), raw["ev"], int(raw["st"]), details)

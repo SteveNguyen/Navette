@@ -166,6 +166,9 @@ def test_parse_nav_gz_by_key():
     line = nav_line().replace(" vc=", " gz=-0.1234 vc=")
     assert bl.parse_line(line).gz == -0.1234
     assert bl.parse_line(nav_line()).gz is None
+    lag = bl.parse_line(line.replace(" cs=", " lag=0.0731 cs="))  # "... vc= wc= lag= cs= f="
+    assert lag.lag == 0.0731 and lag.gz == -0.1234
+    assert bl.parse_line(nav_line()).lag is None
 
 
 def test_odom_heading_from_gz_not_the_wheels():
