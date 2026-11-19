@@ -53,7 +53,8 @@ STEP_IN = ("dt", "a", "v", "w", "v_prev")
 MASK_SHAPE = (192, 320)  # the reference robot's floor masks
 # the [explore] switches at the core's defaults: the prototype's behaviour
 PROTOTYPE_EXPLORE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0,
-                     "blocked_s": 1.0, "blocked_progress": False}
+                     "blocked_s": 1.0, "blocked_progress": False,
+                     "recover_replan": False, "recover_hold_s": 0.0}
 
 
 def runs(frames):

@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from navette import FrontierExplore, FrontierParams, FrontierPlanner, OccupancyGrid, Scan, frontier_cells
+from navette import ExploreParams, FrontierExplore, FrontierParams, FrontierPlanner, OccupancyGrid, Scan, frontier_cells
 
 
 def edit(g, change):
@@ -164,6 +164,34 @@ def test_recovery_turn_is_chosen_once_and_held():
         assert fe.choose_goal(1.0, (0.0, 0.0, yaw), g) == fe.recover
     h = fe.choose_goal(2.0, (0.0, 0.0, math.pi / 2), g)  # reached: back to the planner's heading
     assert fe.recover is None and h == fe.planner.heading((0.0, 0.0, math.pi / 2))
+
+
+def test_replanned_recovery_turns_toward_the_new_path_and_holds():
+    # blocked while heading at 115 deg (the robot faces it): the prototype turns 90 deg to the freer side; with
+    # recover_replan the recovery replans and turns toward the new path (the door, ~0 deg)
+    g = room()
+    up = (0.0, 0.0, 2.0)
+    s = bottom_scan()
+    s.floor[s.bearing_deg < 0] = 0.3  # less free floor on the right
+    for replan, want in ((False, 2.0 + math.pi / 2 - 2 * math.pi), (True, None)):
+        fe = FrontierExplore(ExploreParams(rotate_in_place=True, recover_replan=replan, recover_hold_s=2.0))
+        fe.scan = s
+        fe.on_blocked(0.5, up)
+        h = fe.choose_goal(0.5, up, g)
+        if want is None:  # the path's heading, ~0
+            assert h == fe.planner.heading(up) and abs(h) < 0.2
+        else:
+            assert abs(h - want) < 1e-9
+    # blocked toward the door (0 deg) and the replan says the same: 90 deg the freer way (no turn before),
+    # then for recover_hold_s the goal stays there instead of turning back toward the door
+    fe = FrontierExplore(ExploreParams(rotate_in_place=True, recover_replan=True, recover_hold_s=2.0))
+    fe.scan = s
+    fe.choose_goal(0.0, (0.0, 0.0, 0.0), g)
+    fe.on_blocked(0.5, (0.0, 0.0, 0.0))
+    assert abs(fe.choose_goal(0.5, (0.0, 0.0, 0.0), g) - math.pi / 2) < 1e-9
+    left = (0.0, 0.0, math.pi / 2)
+    assert abs(fe.choose_goal(4.0, left, g) - math.pi / 2) < 1e-9 and fe.recover is None  # turned; held
+    assert fe.choose_goal(6.0, left, g) == fe.planner.heading(left)  # 2 s later: back to the path
 
 
 def test_recovery_turn_is_not_interrupted_by_the_look_around():

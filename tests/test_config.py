@@ -35,6 +35,7 @@ def test_reachy_poussah_values():
         45.0, 0.5, 0.5, 0.3)
     assert (cfg.explore.blocked_s, cfg.explore.blocked_progress, cfg.explore.progress_m, cfg.explore.progress_deg) == (
         3.0, True, 0.05, 17.0)
+    assert (cfg.explore.recover_replan, cfg.explore.recover_hold_s) == (True, 2.0)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -90,6 +91,8 @@ def edited(tmp_path, old, new, count=1):
     (r"^blocked_progress = true$", "blocked_progress = 0", r"\[explore\] blocked_progress = 0: expected bool"),
     (r"^progress_m = 0.05$", "progress_m = -0.05", r"\[explore\] progress_m = -0.05: must be finite and >= 0"),
     (r"^blocked_s = 3.0$", "blocked_s = inf", r"\[explore\] blocked_s = inf"),
+    (r"^recover_replan = true$", "", r"\[explore\]: missing \[.recover_replan.\]"),
+    (r"^recover_hold_s = 2.0$", "recover_hold_s = -2.0", r"\[explore\] recover_hold_s = -2.0: must be finite and >= 0"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),

@@ -75,6 +75,13 @@ blocked_s = 3.0
 blocked_progress = true
 progress_m = 0.05
 progress_deg = 17.0
+# Recovery that does not fight the planner. The core default turns 90 deg toward the side with more free floor in
+# view, then replans; the replan pointed back to the blocked way and the robot turned back (the back-and-forth seen
+# on the robot). Here: replan first, turn toward the new path's heading; if it is the same way (within 20 deg) or
+# there is none, 90 deg the way the robot was already turning. Then for recover_hold_s the goal does not turn back
+# toward the blocked way (Nav2's recovery: the spin refreshes the map so that the replan changes).
+recover_replan = true
+recover_hold_s = 2.0
 
 [behaviour]
 default = "explore"

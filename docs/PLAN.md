@@ -169,6 +169,13 @@ inputs the prototype handled unsafely, and on purpose:
     `progress_m` or turned `progress_deg` since the last progress mark, a rotation counting: Nav2's pose
     progress checker), instead of `blocked_s` without an admissible arc or below `moving_v`. With 1 s of the
     latter, every short hesitation of the arcs started a recovery turn (reference robot: `blocked_s` 3 s).
+  - `recover_replan`, `recover_hold_s` (`exploration/frontier_explore.rs`): on a block, replan first (this
+    scan's near sectors), then turn toward the new path's heading; if there is none or it is within 20 deg of
+    the blocked direction, 90 deg the way of the previous turn in place (none yet: toward the freer side).
+    For `recover_hold_s` after that turn, a path heading nearer the blocked direction than the recovery
+    heading is replaced by the recovery heading. The prototype turned 90 deg toward the freer side, then the
+    replan pointed back to the blocked way and the robot turned back. The second block on a target still
+    bans it.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

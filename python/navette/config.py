@@ -72,6 +72,9 @@ class Explore:
     #                         prototype's rule, no admissible arc or no motion
     progress_m: float     # m
     progress_deg: float   # deg
+    recover_replan: bool  # recovery: replan, turn toward the new path (same way or none: the previous turn's way);
+    #                       false: 90 deg toward the freer side (the core default)
+    recover_hold_s: float  # s, after that recovery the goal does not turn back toward the blocked way (0 = off)
 
 
 @dataclass(frozen=True)

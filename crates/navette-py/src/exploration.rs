@@ -451,7 +451,8 @@ impl PyFrontierExplore {
         self.with(py, |fe| fe.goals.choose_goal(t, pose2(pose), grid))
     }
 
-    /// The way is blocked: start the recovery turn; the second block on the same target bans it.
+    /// The way is blocked: start the recovery turn; the second block on the same target bans it. With
+    /// ExploreParams.recover_replan the recovery heading is chosen by the next choose_goal (after a replan).
     fn on_blocked(&mut self, py: Python<'_>, t: f64, pose: [f64; 3]) {
         self.with(py, |fe| fe.goals.on_blocked(t, pose2(pose)));
     }

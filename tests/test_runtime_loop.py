@@ -21,7 +21,8 @@ from navette.testing.fakes import FakeNavigator, FakeRobot, FakeUpFilter, FakeWo
 ROBOT_TOML = Path(__file__).parents[1] / "robots" / "reachy_poussah.toml"
 # [explore] keys the reference robot sets away from the core defaults, on purpose (see its config file)
 REACHY_SWITCHES = {"near_known": True, "spin_flip_deg": 45.0, "spin_lead_s": 0.5, "spin_accel": 0.5,
-                   "blocked_s": 3.0, "blocked_progress": True}
+                   "blocked_s": 3.0, "blocked_progress": True,
+                   "recover_replan": True, "recover_hold_s": 2.0}
 IMU_MAX_AGE_S = 0.1
 
 

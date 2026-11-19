@@ -93,6 +93,16 @@ pub struct ExploreParams {
     pub progress_m: f64,
     /// or (deg).
     pub progress_deg: f64,
+    /// Recovery that does not fight the planner (false: the prototype's, 90 deg toward the side with more
+    /// free floor in view). On a block: replan first (with this scan's near sectors), then turn toward the
+    /// new path heading; if there is no path or it is within 20 deg of the blocked direction, 90 deg in the
+    /// direction of the previous turn in place (else toward the freer side). The second block on a target
+    /// still bans it. Why: on the real robot the recovery turned away from the path, the replan pointed
+    /// back to the old way and the robot turned back: the visible back-and-forth.
+    pub recover_replan: bool,
+    /// After that recovery turn, for this long (s) the goal does not turn back toward the blocked direction:
+    /// a path heading nearer to it than to the recovery heading is replaced by the recovery heading. 0: no hold.
+    pub recover_hold_s: f64,
 }
 
 impl Default for ExploreParams {
@@ -120,6 +130,8 @@ impl Default for ExploreParams {
             blocked_progress: false,
             progress_m: 0.05,
             progress_deg: 17.0, // ~0.3 rad
+            recover_replan: false,
+            recover_hold_s: 0.0,
         }
     }
 }
@@ -151,6 +163,7 @@ impl ExploreParams {
             ("spin_accel", self.spin_accel),
             ("progress_m", self.progress_m),
             ("progress_deg", self.progress_deg),
+            ("recover_hold_s", self.recover_hold_s),
         ] {
             params::non_negative(&format!("ExploreParams.{name}"), value)?;
         }
