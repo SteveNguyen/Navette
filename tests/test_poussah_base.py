@@ -199,13 +199,14 @@ def test_stand_settings_sent_before_each_stand_up_only(monkeypatch):
     assert b.ctrl.start()[0] and b.sent() == ["nv0,0,1"]
 
 
-def test_reachy_config_carries_the_mini_settings():
+def test_reachy_config_sends_no_settings():
+    """Since firmware 8c704f1 the base loads its Mini profile from its seat switch: the config sends none."""
     from pathlib import Path
 
     from navette.config import load
     cfg = load(str(Path(__file__).resolve().parents[1] / "robots" / "reachy_poussah.toml"))
-    assert tuple(cfg.adapter["stand_settings"]) == MINI
-    pb.PoussahBase(Rig(st=0).link, stand_settings=cfg.adapter["stand_settings"])  # all valid setting lines
+    assert cfg.adapter["stand_settings"] == []
+    pb.PoussahBase(Rig(st=0).link, stand_settings=cfg.adapter["stand_settings"])
 
 
 @pytest.mark.parametrize("bad", ["S0", "E1", "nv0.3,0,1", "A40 S0", "O", "pv2.5\nS0"])
