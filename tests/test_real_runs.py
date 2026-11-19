@@ -52,7 +52,7 @@ OUT_FLOAT = ("out_v", "out_w", "out_v_req", "out_w_req")
 STEP_IN = ("dt", "a", "v", "w", "v_prev")
 MASK_SHAPE = (192, 320)  # the reference robot's floor masks
 # the [explore] switches at the core's defaults: the prototype's behaviour
-PROTOTYPE_EXPLORE = {"near_known": False}
+PROTOTYPE_EXPLORE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0}
 
 
 def runs(frames):

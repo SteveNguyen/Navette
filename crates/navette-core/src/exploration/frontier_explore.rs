@@ -53,8 +53,12 @@ fn numpy_sum(a: &[f64]) -> f64 {
 #[derive(Clone, Debug)]
 pub struct FrontierGoals {
     pub planner: FrontierPlanner,
-    /// The recovery turn ends within this of its heading (rad): the controller's spin_done_deg.
+    /// The recovery turn ends within this of its heading (rad): the controller's spin_done_deg,
     spin_done: f64,
+    /// tested on the heading predicted this far ahead (s): the controller's spin_lead_s.
+    spin_lead: f64,
+    /// This step's measured yaw rate x spin_lead (rad), set by [`FrontierExplore::step`].
+    yaw_lead: f64,
     /// Time of the last plan (s).
     last_plan: f64,
     /// The last scan: its image-bottom sectors for the planner, the side of the recovery turn.
@@ -91,7 +95,13 @@ impl FrontierGoals {
 impl GoalSource for FrontierGoals {
     fn choose_goal(&mut self, t: f64, pose: Pose2, grid: &OccupancyGrid) -> f64 {
         if let Some(recover) = self.recover {
-            if wrap_angle(recover - pose.theta).abs() > self.spin_done {
+            // the heading when the command takes effect (spin_lead > 0), else the current one
+            let heading = if self.spin_lead > 0.0 {
+                pose.theta + self.yaw_lead
+            } else {
+                pose.theta
+            };
+            if wrap_angle(recover - heading).abs() > self.spin_done {
                 return recover;
             }
             self.recover = None;
@@ -161,6 +171,8 @@ impl FrontierExplore {
         let goals = FrontierGoals {
             planner: FrontierPlanner::new(frontier)?,
             spin_done: params.spin_done_deg.to_radians(),
+            spin_lead: params.spin_lead_s,
+            yaw_lead: 0.0,
             last_plan: f64::NEG_INFINITY,
             scan: None,
             recover: None,
@@ -181,8 +193,10 @@ impl FrontierExplore {
     }
 
     /// Requested (v, w) at time `t` (s) from `pose` on `grid`. `scan`: this frame's (None: the last one is
-    /// kept for the planner). `v_applied`: the speed command sent last step (m/s). `near_known`: the scan's
-    /// sectors whose blind segment the map explains, for the arc controller (see [`ArcController::step`]).
+    /// kept for the planner). `v_applied`: the speed command sent last step (m/s). `w_meas`: the measured yaw
+    /// rate (rad/s). `near_known`: the scan's sectors whose blind segment the map explains, for the arc
+    /// controller (see [`ArcController::step`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         t: f64,
@@ -190,8 +204,10 @@ impl FrontierExplore {
         scan: Option<&Scan>,
         grid: &OccupancyGrid,
         v_applied: f64,
+        w_meas: f64,
         near_known: Option<&[bool]>,
     ) -> (f64, f64) {
+        self.goals.yaw_lead = w_meas * self.goals.spin_lead;
         let dt = self.last_t.map_or(0.0, |last| t - last);
         self.last_t = Some(t);
         if let Some(scan) = scan {
@@ -217,7 +233,16 @@ impl FrontierExplore {
         if matches!(c.state, State::Done | State::Look) {
             c.state = State::Drive;
         }
-        c.step(&mut self.goals, t, pose, scan, grid, v_applied, near_known)
+        c.step(
+            &mut self.goals,
+            t,
+            pose,
+            scan,
+            grid,
+            v_applied,
+            w_meas,
+            near_known,
+        )
     }
 }
 
@@ -275,7 +300,7 @@ mod tests {
         let g = room(0.0); // closed room: nothing to explore
         let mut fe = explore();
         let cmds: Vec<(f64, f64)> = (0..100)
-            .map(|k| fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, None))
+            .map(|k| fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, 0.0, None))
             .collect();
         let n_look = cmds.iter().filter(|c| c.0 == 0.0 && c.1 > 0.0).count();
         assert!((n_look as f64 * 0.1 * 1.0 - TAU).abs() < 0.2); // one full turn
@@ -285,9 +310,9 @@ mod tests {
     #[test]
     fn a_frontier_coming_back_resumes_exploration() {
         let mut fe = explore();
-        fe.step(0.0, HERE, None, &room(0.0), 0.0, None);
+        fe.step(0.0, HERE, None, &room(0.0), 0.0, 0.0, None);
         assert_eq!(fe.state(), State::Look);
-        let (v, w) = fe.step(1.0, HERE, Some(&scan(2.0, 2.0)), &room(0.8), 0.0, None);
+        let (v, w) = fe.step(1.0, HERE, Some(&scan(2.0, 2.0)), &room(0.8), 0.0, 0.0, None);
         assert_eq!(fe.state(), State::Drive);
         assert!(v > 0.0 && w.abs() < 0.3); // the door is straight ahead
     }
@@ -324,13 +349,32 @@ mod tests {
     }
 
     #[test]
+    fn the_recovery_turn_ends_on_the_predicted_heading() {
+        // recovery turn to 90 deg, now at 64 deg turning at 0.5 rad/s: 26 deg to go now, 11.7 deg in 0.5 s
+        let g = room(0.8);
+        let at = Pose2::new(0.0, 0.0, 64f64.to_radians());
+        for (spin_lead_s, w_meas, ends) in [(0.0, 0.5, false), (0.5, 0.0, false), (0.5, 0.5, true)] {
+            let params = ExploreParams {
+                rotate_in_place: true,
+                spin_lead_s,
+                ..Default::default()
+            };
+            let mut fe =
+                FrontierExplore::new(params, SafetyParams::default(), FrontierParams::default()).unwrap();
+            fe.goals.recover = Some(FRAC_PI_2);
+            fe.step(0.0, at, None, &g, 0.0, w_meas, None);
+            assert_eq!(fe.goals.recover.is_none(), ends, "lead {spin_lead_s}, w {w_meas}");
+        }
+    }
+
+    #[test]
     fn recovery_turn_is_not_interrupted_by_the_look_around() {
         // planner done (closed room) while a recovery turn to the right is under way: keep turning right
         let g = room(0.0);
         let mut fe = explore();
         fe.goals.recover = Some(-FRAC_PI_2);
         for k in 0..5 {
-            let (v, w) = fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, None);
+            let (v, w) = fe.step(k as f64 * 0.1, HERE, None, &g, 0.0, 0.0, None);
             assert!(fe.goals.planner.done() && fe.state() != State::Look && v == 0.0 && w < 0.0);
         }
     }

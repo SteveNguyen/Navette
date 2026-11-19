@@ -57,6 +57,16 @@ v_set = [0.1, 0.2, 0.3]
 # monitor exempts those the map explains: on 512 of the 1405 steps without an admissible arc, the monitor's rule
 # allowed some. near_known = true: the arcs use the monitor's rule (the monitor itself is unchanged).
 near_known = true
+# Latched turns in place. The turn direction was sign(goal - heading) at every step, so a goal near 180 deg off or
+# a replan reversed a turn half-way. Now a turn keeps its direction unless the goal moved more than spin_flip_deg
+# (or the robot overshot). Its end is tested on the heading spin_lead_s ahead (heading + measured yaw rate x
+# spin_lead_s): the command takes effect ~0.4-0.9 s after the frame (outputs ~0.4 s old typically, see
+# [perception]), turning at ~0.43 rad/s. spin_accel / spin_w_min: slow down before the end, |w| =
+# min(w_spin, max(spin_w_min, sqrt(2 spin_accel angle))).
+spin_flip_deg = 45.0
+spin_lead_s = 0.5
+spin_accel = 0.5
+spin_w_min = 0.3
 
 [behaviour]
 default = "explore"

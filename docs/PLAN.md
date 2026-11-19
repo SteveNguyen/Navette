@@ -158,6 +158,13 @@ inputs the prototype handled unsafely, and on purpose:
     map does not explain it (`blind_known`, asked before the frame goes in), the collision monitor's own rule.
     On 512 of the 1405 steps without an admissible arc, that rule allowed some. The collision monitor is
     unchanged and stays the safety layer.
+  - Latched turns in place (`controller/dwa.rs`, `frontier_explore.rs`): `spin_flip_deg` > 0 keeps the
+    direction a turn in place (SPIN, rotate-in-place, recovery) started with until it ends, reversing only if
+    the goal heading moved more than that since (or on an overshoot); the prototype took sign(goal - heading)
+    at every step, so a goal near 180 deg or a replan reversed turns half-way. `spin_lead_s` > 0 tests the end
+    of a turn on heading + measured yaw rate x `spin_lead_s` (the command takes effect ~0.4-0.9 s after the
+    frame). `spin_accel` > 0 slows the turn near its end, |w| = min(w_spin, max(`spin_w_min`,
+    sqrt(2 `spin_accel` angle))), as Nav2's rotation shim.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

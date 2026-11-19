@@ -458,8 +458,9 @@ impl PyFrontierExplore {
 
     /// Requested (v, w) at time t (s) from pose (x, y, theta). scan: this frame's Scan (None: the last one
     /// is kept); grid: the OccupancyGrid; v_applied: the speed command sent last step (m/s); near_known:
-    /// per-sector bool of this scan, blind segment explained by the map (used with ExploreParams.near_known).
-    #[pyo3(signature = (t, pose, scan, grid, v_applied, near_known=None))]
+    /// per-sector bool of this scan, blind segment explained by the map (used with ExploreParams.near_known);
+    /// w_meas: the measured yaw rate (rad/s), for the end of the turns in place (ExploreParams.spin_lead_s).
+    #[pyo3(signature = (t, pose, scan, grid, v_applied, near_known=None, w_meas=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
@@ -470,6 +471,7 @@ impl PyFrontierExplore {
         grid: PyRef<'_, PyOccupancyGrid>,
         v_applied: f64,
         near_known: Option<PyReadonlyArray1<'_, bool>>,
+        w_meas: f64,
     ) -> PyResult<(f64, f64)> {
         let scan = scan.map(|s| s.to_core(py)).transpose()?;
         let near_known = match (&scan, near_known) {
@@ -489,6 +491,7 @@ impl PyFrontierExplore {
                 scan.as_ref(),
                 grid,
                 v_applied,
+                w_meas,
                 near_known.as_deref(),
             )
         }))

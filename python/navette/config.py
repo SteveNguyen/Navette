@@ -62,6 +62,11 @@ class Explore:
     #               afterwards, so a candidate above it only says "as fast as allowed"
     near_known: bool  # the arcs put an obstacle off the image bottom at the clearance radius only where the map
     #                   does not explain it (the collision monitor's rule); false: everywhere (the core default)
+    spin_flip_deg: float  # deg, latched turns in place: reverse only if the goal moved more than this since the
+    #                       turn started (or on an overshoot); 0 = no latch (the core default)
+    spin_lead_s: float    # s, the end of a turn in place is tested on heading + measured yaw rate x this
+    spin_accel: float     # rad/s^2, slow down before the end of a turn in place (sqrt(2 a angle)); 0 = off
+    spin_w_min: float     # rad/s, the lowest yaw rate of that slowdown (> 0)
 
 
 @dataclass(frozen=True)
@@ -137,7 +142,7 @@ _NUMBER = {"float": (int, float), "int": (int,), "str": (str,)}
 # Ranges: every number is finite and >= 0; these are > 0 (a zero would divide, never time out, or stop
 # nothing), and the page port is a port.
 _POSITIVE = {"safety": ("v_max", "decel", "step", "n_speeds"), "perception": ("stale_s", "imu_max_age_s"),
-             "camera": ("body_z",), "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
+             "camera": ("body_z",), "explore": ("spin_w_min",), "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
              "page": ("port",), "glance": ("n_frames",)}
 
 

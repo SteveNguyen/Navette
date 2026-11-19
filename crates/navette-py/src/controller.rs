@@ -27,7 +27,15 @@ use crate::scan::PyScan;
 ///   near_known       the collision monitor's near rule for the arcs: an obstacle off the image bottom is put
 ///                    at the clearance radius only where the map does not explain it (the near_known mask
 ///                    given to step); False: everywhere (the prototype)
-/// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap or w_spin <= 0,
+///   spin_flip_deg    deg, latched turns in place: a turn keeps its direction until it ends, reversing only if
+///                    the goal moved more than this since it started (or on an overshoot); 0: no latch, the
+///                    direction is sign(goal - heading) at every step (the prototype)
+///   spin_lead_s      s, the end of a turn in place is tested on heading + w_meas x this (0: the prototype)
+///   spin_accel       rad/s^2, slow down before the end of a turn in place: |w| = min(w_spin, max(spin_w_min,
+///                    sqrt(2 spin_accel |angle to go|))); 0: always w_spin (the prototype)
+///   spin_w_min       rad/s, the lowest yaw rate of that slowdown (> 0)
+/// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap, w_spin or
+/// spin_w_min <= 0,
 /// a negative or non-finite value): at construction, and where the parameters are used (the attributes can
 /// be set afterwards).
 #[pyclass(name = "ExploreParams", module = "navette", get_all, set_all, eq)]
@@ -48,6 +56,10 @@ pub struct PyExploreParams {
     rotate_in_place: bool,
     moving_v: f64,
     near_known: bool,
+    spin_flip_deg: f64,
+    spin_lead_s: f64,
+    spin_accel: f64,
+    spin_w_min: f64,
 }
 
 impl PyExploreParams {
@@ -69,6 +81,10 @@ impl PyExploreParams {
             rotate_in_place: self.rotate_in_place,
             moving_v: self.moving_v,
             near_known: self.near_known,
+            spin_flip_deg: self.spin_flip_deg,
+            spin_lead_s: self.spin_lead_s,
+            spin_accel: self.spin_accel,
+            spin_w_min: self.spin_w_min,
         };
         p.validate().map_err(param_err)?;
         Ok(p)
@@ -91,6 +107,10 @@ impl PyExploreParams {
             rotate_in_place: p.rotate_in_place,
             moving_v: p.moving_v,
             near_known: p.near_known,
+            spin_flip_deg: p.spin_flip_deg,
+            spin_lead_s: p.spin_lead_s,
+            spin_accel: p.spin_accel,
+            spin_w_min: p.spin_w_min,
         }
     }
 }
@@ -100,7 +120,8 @@ impl PyExploreParams {
     #[new]
     #[pyo3(signature = (v_set=vec![0.1, 0.2, 0.3], w_max=1.2, n_w=13, horizon_s=1.0, k_heading=1.0, k_clear=0.6,
                         k_speed=0.3, clear_cap=1.0, spin_above_deg=70.0, spin_done_deg=20.0, w_spin=1.0,
-                        blocked_s=1.0, rotate_in_place=false, moving_v=0.05, near_known=false))]
+                        blocked_s=1.0, rotate_in_place=false, moving_v=0.05, near_known=false, spin_flip_deg=0.0,
+                        spin_lead_s=0.0, spin_accel=0.0, spin_w_min=0.3))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         v_set: Vec<f64>,
@@ -118,6 +139,10 @@ impl PyExploreParams {
         rotate_in_place: bool,
         moving_v: f64,
         near_known: bool,
+        spin_flip_deg: f64,
+        spin_lead_s: f64,
+        spin_accel: f64,
+        spin_w_min: f64,
     ) -> PyResult<Self> {
         let p = Self {
             v_set,
@@ -135,6 +160,10 @@ impl PyExploreParams {
             rotate_in_place,
             moving_v,
             near_known,
+            spin_flip_deg,
+            spin_lead_s,
+            spin_accel,
+            spin_w_min,
         };
         p.to_core()?;
         Ok(p)
@@ -144,7 +173,8 @@ impl PyExploreParams {
         format!(
             "ExploreParams(v_set={:?}, w_max={:?}, n_w={}, horizon_s={:?}, k_heading={:?}, k_clear={:?}, \
              k_speed={:?}, clear_cap={:?}, spin_above_deg={:?}, spin_done_deg={:?}, w_spin={:?}, \
-             blocked_s={:?}, rotate_in_place={}, moving_v={:?}, near_known={})",
+             blocked_s={:?}, rotate_in_place={}, moving_v={:?}, near_known={}, spin_flip_deg={:?}, \
+             spin_lead_s={:?}, spin_accel={:?}, spin_w_min={:?})",
             self.v_set,
             self.w_max,
             self.n_w,
@@ -159,7 +189,11 @@ impl PyExploreParams {
             self.blocked_s,
             if self.rotate_in_place { "True" } else { "False" },
             self.moving_v,
-            if self.near_known { "True" } else { "False" }
+            if self.near_known { "True" } else { "False" },
+            self.spin_flip_deg,
+            self.spin_lead_s,
+            self.spin_accel,
+            self.spin_w_min
         )
     }
 }
@@ -215,8 +249,9 @@ impl PyArcController {
     /// scan: this frame's Scan; grid: the OccupancyGrid; v_applied: the speed command sent last step (m/s).
     /// Blocked for blocked_s: the controller turns to `goal` in place.
     /// near_known: per-sector bool, blind segment explained by the map (OccupancyGrid.blind_known before the
-    /// frame went in); used only with ExploreParams.near_known.
-    #[pyo3(signature = (t, pose, scan, grid, v_applied, goal, near_known=None))]
+    /// frame went in); used only with ExploreParams.near_known. w_meas: the measured yaw rate (rad/s), for
+    /// the end of the turns in place (ExploreParams.spin_lead_s).
+    #[pyo3(signature = (t, pose, scan, grid, v_applied, goal, near_known=None, w_meas=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn step(
         &mut self,
@@ -228,6 +263,7 @@ impl PyArcController {
         v_applied: f64,
         goal: f64,
         near_known: Option<PyReadonlyArray1<'_, bool>>,
+        w_meas: f64,
     ) -> PyResult<(f64, f64)> {
         let scan = scan.to_core(py)?;
         let near_known = sector_mask(near_known, scan.len(), "near_known")?;
@@ -239,6 +275,7 @@ impl PyArcController {
             Some(&scan),
             &grid.inner,
             v_applied,
+            w_meas,
             near_known.as_deref(),
         ))
     }

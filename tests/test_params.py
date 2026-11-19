@@ -108,7 +108,9 @@ def test_frontier_params(key, value):
 EXPLORE_BAD = [("v_set", []), ("v_set", [0.1, 0.0]), ("v_set", [-0.1]), ("v_set", [NAN]), ("n_w", 0),
                ("w_max", -1.2), ("w_max", NAN), ("clear_cap", 0.0), ("w_spin", 0.0), ("w_spin", NAN),
                ("blocked_s", NAN), ("blocked_s", -1.0), ("horizon_s", INF), ("k_heading", NAN),
-               ("spin_done_deg", -1.0), ("moving_v", -0.05), ("moving_v", NAN)]
+               ("spin_done_deg", -1.0), ("moving_v", -0.05), ("moving_v", NAN),
+               ("spin_flip_deg", -1.0), ("spin_lead_s", NAN), ("spin_accel", -0.1), ("spin_w_min", 0.0),
+               ("spin_w_min", INF)]
 
 
 @pytest.mark.parametrize("key, value", EXPLORE_BAD)

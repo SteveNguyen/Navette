@@ -80,6 +80,38 @@ def test_near_known_uses_the_collision_monitor_s_near_rule():
         ArcController(on).step(0.0, (0, 0, 0), sc, OccupancyGrid(), 0.3, 0.0, np.ones(3, bool))
 
 
+def turn_rates(params, headings_deg, goals_deg, w_meas=0.0):
+    """Yaw rates commanded on open floor from these headings toward these goals (deg), one step each."""
+    ex = ArcController(params)
+    return [ex.step(k * 0.1, (0, 0, math.radians(h)), scan(), OccupancyGrid(), 0.0, math.radians(g),
+                    w_meas=w_meas)[1] for k, (h, g) in enumerate(zip(headings_deg, goals_deg))]
+
+
+def test_latched_turn_toward_a_goal_behind():
+    # the goal ~180 deg off jitters across +-180 (replans): the prototype reverses at each crossing
+    goals = [178, -178, 178, -178]
+    assert turn_rates(ExploreParams(), [0] * 4, goals) == [1.0, -1.0, 1.0, -1.0]
+    latched = ExploreParams(spin_flip_deg=45.0)
+    assert turn_rates(latched, [0] * 4, goals) == [1.0] * 4
+    # a real goal switch (more than spin_flip_deg) reverses; so does an overshoot (40 deg past the goal)
+    assert turn_rates(latched, [0, 0], [178, -100]) == [1.0, -1.0]
+    assert turn_rates(latched, [0, 130], [90, 90]) == [1.0, -1.0]
+
+
+def test_turn_ends_on_the_predicted_heading_and_slows_down():
+    # spinning to 90 deg, at 64 deg turning at 0.5 rad/s: 0.5 s ahead it is within spin_done (20 deg)
+    assert turn_rates(ExploreParams(), [0, 64], [90, 90], w_meas=0.5) == [1.0, 1.0]
+    w = turn_rates(ExploreParams(spin_lead_s=0.5), [0, 64], [90, 90], w_meas=0.5)
+    assert w[0] == 1.0 and w[1] < 1.0  # an arc: the turn ended
+    # slowdown: sqrt(2 a angle) between spin_w_min and w_spin (a goal 30 deg off: rotate in place, no arc)
+    sc = scan(lambda b: 0.2, fov=181, closest=0.15)
+    slow = ExploreParams(rotate_in_place=True, spin_accel=0.5, spin_w_min=0.3)
+    (v, w), _ = run(sc, math.radians(30), ex=ArcController(slow), v_applied=0.0)
+    assert v == 0.0 and w == pytest.approx(math.sqrt(2 * 0.5 * math.radians(30)))
+    (v, w), _ = run(sc, math.radians(30), ex=ArcController(ExploreParams(rotate_in_place=True)), v_applied=0.0)
+    assert w == 1.0
+
+
 def test_map_obstacles_count_as_the_scan_s():
     # open scan, but the map holds a wall 0.28 m ahead: too close to stop from cruise speed
     grid = OccupancyGrid(size_m=6.0)

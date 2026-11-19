@@ -31,6 +31,8 @@ def test_reachy_poussah_values():
     assert cfg.explore.v_set == (0.1, 0.2, 0.3)
     # the exploration fixes measured on the robot's runs, on (the core's defaults are off)
     assert cfg.explore.near_known is True
+    assert (cfg.explore.spin_flip_deg, cfg.explore.spin_lead_s, cfg.explore.spin_accel, cfg.explore.spin_w_min) == (
+        45.0, 0.5, 0.5, 0.3)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -80,6 +82,9 @@ def edited(tmp_path, old, new, count=1):
     (r"^near_known = true$", "", r"\[explore\]: missing \['near_known'\]"),
     (r"^near_known = true$", "near_known = 1", r"\[explore\] near_known = 1: expected bool"),
     (r"^near_known = true$", 'near_known = "true"', r"\[explore\] near_known = 'true': expected bool"),
+    (r"^spin_w_min = 0.3$", "spin_w_min = 0.0", r"\[explore\] spin_w_min = 0.0: must be finite and > 0"),
+    (r"^spin_lead_s = 0.5$", "spin_lead_s = -0.5", r"\[explore\] spin_lead_s = -0.5: must be finite and >= 0"),
+    (r"^spin_flip_deg = 45.0$", "spin_flip_deg = nan", r"\[explore\] spin_flip_deg = nan"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),

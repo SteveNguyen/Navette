@@ -15,6 +15,8 @@
 //! Numerics follow the Python prototype: candidates in the same order (v, then w as numpy's linspace) and a
 //! strictly better score to replace the best, so the same arc wins ties.
 
+use std::f64::consts::{PI, TAU};
+
 use crate::collision_monitor::{boundary_points, free_arc_lengths, stopping_distance, SafetyParams};
 use crate::controller::State;
 use crate::geometry::{wrap_angle, Pose2};
@@ -65,6 +67,22 @@ pub struct ExploreParams {
     /// at an angle in a corridor, bottles, shoes), and on 512 of the 1405 steps without an admissible arc the
     /// collision monitor, which applies this rule, would have allowed some.
     pub near_known: bool,
+    /// Latched in-place turns (deg; 0: no latch, the prototype). A turn in place (SPIN, the rotate-in-place
+    /// turn in DRIVE, the recovery turn) keeps the direction it started with until it ends; it reverses only
+    /// if the goal heading has moved more than this since the turn started, or if the robot overshot the
+    /// goal (the latched way round would be more than 180 deg + this). Without it the direction is
+    /// sign(goal - heading) at every step, so a goal near 180 deg off or a replan reverses a turn half-way:
+    /// ~16 reversals in a 4-minute run of the real robot.
+    pub spin_flip_deg: f64,
+    /// The end of a turn in place is tested on the heading predicted this far ahead (s): heading + measured
+    /// yaw rate x spin_lead_s (0: the current heading, the prototype). The command reaches the base
+    /// ~0.4-0.9 s after the frame was taken (at ~8 Hz), so a turn stopped on the current heading overshoots.
+    pub spin_lead_s: f64,
+    /// Slow down before the end of a turn in place (rad/s^2; 0: always w_spin, the prototype): |w| =
+    /// min(w_spin, max(spin_w_min, sqrt(2 spin_accel |angle to go|))), as Nav2's rotation shim.
+    pub spin_accel: f64,
+    /// Lowest yaw rate (rad/s) of that slowdown, so that a turn never stalls.
+    pub spin_w_min: f64,
 }
 
 impl Default for ExploreParams {
@@ -85,13 +103,18 @@ impl Default for ExploreParams {
             rotate_in_place: false,
             moving_v: 0.05,
             near_known: false,
+            spin_flip_deg: 0.0,
+            spin_lead_s: 0.0,
+            spin_accel: 0.0,
+            spin_w_min: 0.3,
         }
     }
 }
 
 impl ExploreParams {
     /// Every value finite; v_set not empty, its speeds > 0 (w / v is the arc's curvature); n_w >= 1;
-    /// clear_cap > 0; w_spin > 0 (with 0 the look-around never ends); the others >= 0, the score weights any.
+    /// clear_cap > 0; w_spin and spin_w_min > 0 (with 0 the look-around or a turn may never end); the others
+    /// >= 0, the score weights any.
     pub fn validate(&self) -> Result<(), ParamError> {
         if self.v_set.is_empty() {
             return Err(ParamError("ExploreParams.v_set: must not be empty".into()));
@@ -102,6 +125,7 @@ impl ExploreParams {
         params::count("ExploreParams.n_w", self.n_w, MAX_N_W)?;
         params::positive("ExploreParams.clear_cap", self.clear_cap)?;
         params::positive("ExploreParams.w_spin", self.w_spin)?;
+        params::positive("ExploreParams.spin_w_min", self.spin_w_min)?;
         for (name, value) in [
             ("w_max", self.w_max),
             ("horizon_s", self.horizon_s),
@@ -109,6 +133,9 @@ impl ExploreParams {
             ("spin_done_deg", self.spin_done_deg),
             ("blocked_s", self.blocked_s),
             ("moving_v", self.moving_v),
+            ("spin_flip_deg", self.spin_flip_deg),
+            ("spin_lead_s", self.spin_lead_s),
+            ("spin_accel", self.spin_accel),
         ] {
             params::non_negative(&format!("ExploreParams.{name}"), value)?;
         }
@@ -153,6 +180,47 @@ fn linspace(start: f64, stop: f64, num: usize) -> impl Iterator<Item = f64> {
     })
 }
 
+/// A turn in place under way, with `spin_flip_deg` > 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Turn {
+    /// +1 counter-clockwise (left), -1 clockwise.
+    pub dir: f64,
+    /// The goal heading when the turn (or its last reversal) started (fixed frame, rad).
+    pub goal: f64,
+}
+
+/// Angle (rad, in [0, 2 pi)) left to turn in direction `dir` (+1 left, -1 right) to cancel the heading
+/// error `err` (goal - heading, wrapped).
+fn to_go(err: f64, dir: f64) -> f64 {
+    (err * dir).rem_euclid(TAU)
+}
+
+/// The command (0, w) of a turn in place toward `goal`, `err` off the heading. `dir0`: the direction the
+/// prototype takes (the sign of err). With `spin_flip_deg` > 0 the direction of `latch` is kept unless the
+/// goal moved more than that since it was set, or the latched way round is more than 180 deg + that (an
+/// overshoot); otherwise the latch is set to `dir0`. With `spin_accel` > 0, |w| slows down near the goal.
+fn turn(p: &ExploreParams, latch: &mut Option<Turn>, goal: f64, err: f64, dir0: f64) -> (f64, f64) {
+    let dir = if p.spin_flip_deg > 0.0 {
+        let flip = p.spin_flip_deg.to_radians();
+        match *latch {
+            Some(l) if wrap_angle(goal - l.goal).abs() <= flip && to_go(err, l.dir) <= PI + flip => l.dir,
+            _ => {
+                *latch = Some(Turn { dir: dir0, goal });
+                dir0
+            }
+        }
+    } else {
+        dir0
+    };
+    let w = if p.spin_accel > 0.0 {
+        let slowed = (2.0 * p.spin_accel * to_go(err, dir)).sqrt();
+        p.w_spin.min(slowed.max(p.spin_w_min))
+    } else {
+        p.w_spin
+    };
+    (0.0, w.copysign(dir))
+}
+
 /// See the module documentation. One controller per robot; call [`ArcController::step`] once per frame.
 #[derive(Clone, Debug)]
 pub struct ArcController {
@@ -164,6 +232,8 @@ pub struct ArcController {
     pub state: State,
     /// Since when (s) there has been no admissible arc or no motion.
     pub blocked_since: Option<f64>,
+    /// The latched turn in place under way (`spin_flip_deg` > 0), None when not turning.
+    pub turn: Option<Turn>,
 }
 
 impl ArcController {
@@ -177,13 +247,15 @@ impl ArcController {
             goal: None,
             state: State::Drive,
             blocked_since: None,
+            turn: None,
         })
     }
 
     /// Requested (v, w) at time `t` (s) from `pose`. `scan`: this frame's (None: the arcs are checked
-    /// against the map alone). `v_applied`: the speed command sent last step (m/s). `near_known`: per scan
-    /// sector, its blind segment is explained by the map (`OccupancyGrid::blind_known`, asked before the
-    /// frame went into the map); used only with `params.near_known`.
+    /// against the map alone). `v_applied`: the speed command sent last step (m/s). `w_meas`: the measured
+    /// yaw rate (rad/s), for the end of the turns in place (`spin_lead_s`). `near_known`: per scan sector,
+    /// its blind segment is explained by the map (`OccupancyGrid::blind_known`, asked before the frame went
+    /// into the map); used only with `params.near_known`.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
@@ -193,22 +265,29 @@ impl ArcController {
         scan: Option<&Scan>,
         grid: &OccupancyGrid,
         v_applied: f64,
+        w_meas: f64,
         near_known: Option<&[bool]>,
     ) -> (f64, f64) {
         let goal = goals.choose_goal(t, pose, grid);
         self.goal = Some(goal);
         let (p, s) = (&self.params, &self.safety);
         let err = wrap_angle(goal - pose.theta);
-        let spin = (0.0, p.w_spin.copysign(err));
+        // the end of a turn is tested on the heading the robot will have when this command takes effect
+        let err_end = if p.spin_lead_s > 0.0 {
+            wrap_angle(goal - (pose.theta + w_meas * p.spin_lead_s))
+        } else {
+            err
+        };
+        let dir0 = 1f64.copysign(err);
         if self.state == State::Spin {
-            if err.abs() > p.spin_done_deg.to_radians() {
-                return spin;
+            if err_end.abs() > p.spin_done_deg.to_radians() {
+                return turn(p, &mut self.turn, goal, err, dir0);
             }
             self.state = State::Drive;
         }
         if err.abs() > p.spin_above_deg.to_radians() {
             (self.state, self.blocked_since) = (State::Spin, None);
-            return spin;
+            return turn(p, &mut self.turn, goal, err, dir0);
         }
 
         // an obstacle running off the image bottom may be anywhere in the blind zone: at the clearance radius
@@ -240,11 +319,11 @@ impl ArcController {
                 (best, best_score) = (Some((v, w)), score);
             }
         }
-        if best.is_none() && p.rotate_in_place && err.abs() > p.spin_done_deg.to_radians() {
+        if best.is_none() && p.rotate_in_place && err_end.abs() > p.spin_done_deg.to_radians() {
             // Turning in place is always safe for a round robot. It is progress toward the goal, so it does
             // not count as blocked; once facing the goal with still no arc, it does.
             self.blocked_since = None;
-            return spin;
+            return turn(p, &mut self.turn, goal, err, dir0);
         }
         if best.is_some() && v_applied >= p.moving_v {
             self.blocked_since = None;
@@ -259,8 +338,11 @@ impl ArcController {
             self.goal = Some(goal);
             self.state = State::Spin;
             let err = wrap_angle(goal - pose.theta);
-            return (0.0, p.w_spin.copysign(if err == 0.0 { 1.0 } else { err }));
+            let dir0 = if err == 0.0 { 1.0 } else { 1f64.copysign(err) };
+            self.turn = None; // a new turn: its own direction
+            return turn(p, &mut self.turn, goal, err, dir0);
         }
+        self.turn = None; // not turning in place
         best.unwrap_or((0.0, 0.0))
     }
 }
@@ -299,7 +381,10 @@ mod tests {
         let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
         let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(goal_deg.to_radians());
-        (c.step(&mut goal, 0.0, HERE, Some(sc), &grid, v_applied, None), c)
+        (
+            c.step(&mut goal, 0.0, HERE, Some(sc), &grid, v_applied, 0.0, None),
+            c,
+        )
     }
 
     #[test]
@@ -412,15 +497,15 @@ mod tests {
         let mut goal = FixedGoal(90f64.to_radians());
         let at = |deg: f64| Pose2::new(0.0, 0.0, deg.to_radians());
         assert_eq!(
-            c.step(&mut goal, 0.0, at(0.0), Some(&open()), &grid, 0.0, None),
+            c.step(&mut goal, 0.0, at(0.0), Some(&open()), &grid, 0.0, 0.0, None),
             (0.0, 1.0)
         );
         // 40 deg left: below spin_above, but the spin goes on until within spin_done
         assert_eq!(
-            c.step(&mut goal, 0.1, at(50.0), Some(&open()), &grid, 0.0, None),
+            c.step(&mut goal, 0.1, at(50.0), Some(&open()), &grid, 0.0, 0.0, None),
             (0.0, 1.0)
         );
-        let (v, _) = c.step(&mut goal, 0.2, at(75.0), Some(&open()), &grid, 0.0, None);
+        let (v, _) = c.step(&mut goal, 0.2, at(75.0), Some(&open()), &grid, 0.0, 0.0, None);
         assert!(v > 0.0 && c.state == State::Drive);
     }
 
@@ -465,7 +550,7 @@ mod tests {
                 ..Default::default()
             };
             let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
-            c.step(&mut FixedGoal(0.0), 0.0, HERE, Some(&sc), &grid, 0.3, mask)
+            c.step(&mut FixedGoal(0.0), 0.0, HERE, Some(&sc), &grid, 0.3, 0.0, mask)
         };
         let all = vec![true; 180];
         let none = vec![false; 180];
@@ -480,6 +565,113 @@ mod tests {
         // ... and an arc once the map explains those sectors (they keep their visible 0.4 m)
         let (v, _) = run(true, Some(&all));
         assert!(v > 0.0);
+    }
+
+    /// Goal headings (deg) given one per step, the last one repeated.
+    struct Goals(Vec<f64>, usize);
+
+    impl GoalSource for Goals {
+        fn choose_goal(&mut self, _t: f64, _pose: Pose2, _grid: &OccupancyGrid) -> f64 {
+            let g = self.0[self.1.min(self.0.len() - 1)];
+            self.1 += 1;
+            g.to_radians()
+        }
+
+        fn on_blocked(&mut self, _t: f64, _pose: Pose2) {}
+    }
+
+    /// The yaw rates commanded with these params from these headings (deg) toward these goals (deg), the
+    /// measured yaw rate `w_meas`, on open floor.
+    fn turns(params: ExploreParams, headings: &[f64], goals: &[f64], w_meas: f64) -> Vec<f64> {
+        let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
+        let mut g = Goals(goals.to_vec(), 0);
+        headings
+            .iter()
+            .enumerate()
+            .map(|(k, &h)| {
+                let pose = Pose2::new(0.0, 0.0, h.to_radians());
+                let t = k as f64 * 0.1;
+                c.step(&mut g, t, pose, Some(&open()), &grid, 0.0, w_meas, None).1
+            })
+            .collect()
+    }
+
+    fn latched() -> ExploreParams {
+        ExploreParams {
+            spin_flip_deg: 45.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_latched_turn_toward_a_goal_behind_does_not_reverse() {
+        // goal ~180 deg off, jittering across +-180 (a replan): the prototype follows sign(err) and reverses
+        // at each crossing; the latched turn keeps its direction (the goal moved 4 deg < spin_flip_deg)
+        let headings = [0.0; 4];
+        let goals = [178.0, -178.0, 178.0, -178.0];
+        assert_eq!(
+            turns(ExploreParams::default(), &headings, &goals, 0.0),
+            [1.0, -1.0, 1.0, -1.0]
+        );
+        assert_eq!(turns(latched(), &headings, &goals, 0.0), [1.0; 4]);
+        // turning left toward 178, the heading moves on and the goal flips to -178: still left
+        let headings = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0];
+        let goals = [178.0, -178.0];
+        assert_eq!(turns(latched(), &headings, &goals, 0.0), [1.0; 6]);
+    }
+
+    #[test]
+    fn a_latched_turn_reverses_on_a_goal_switch_or_an_overshoot() {
+        // the goal moves by more than spin_flip_deg (another target): the new turn takes its own direction
+        assert_eq!(turns(latched(), &[0.0; 2], &[178.0, -100.0], 0.0), [1.0, -1.0]);
+        // an overshoot: turning left toward 90, the heading ends up 40 deg past it (more than spin_done):
+        // the way back is the short one, not 320 deg further left
+        assert_eq!(turns(latched(), &[0.0, 130.0], &[90.0], 0.0), [1.0, -1.0]);
+    }
+
+    #[test]
+    fn the_end_of_a_turn_is_tested_on_the_predicted_heading() {
+        // spinning toward 90 deg, now at 64 deg (26 deg to go, more than spin_done = 20) turning at 0.5 rad/s
+        let lead = ExploreParams {
+            spin_lead_s: 0.5,
+            ..Default::default()
+        };
+        // the prototype: on the current heading, the turn goes on
+        let want = [1.0, 1.0];
+        assert_eq!(turns(ExploreParams::default(), &[0.0, 64.0], &[90.0], 0.5), want);
+        // 0.5 s ahead the heading is 64 + 14.3 deg: within spin_done, the turn ends (an arc, w < w_spin)
+        let w = turns(lead.clone(), &[0.0, 64.0], &[90.0], 0.5);
+        assert!(w[0] == 1.0 && w[1] < 1.0, "{w:?}");
+        // without a measured yaw rate the prediction is the heading itself
+        assert_eq!(turns(lead, &[0.0, 64.0], &[90.0], 0.0), want);
+    }
+
+    #[test]
+    fn the_turn_slows_down_near_its_goal() {
+        let slow = ExploreParams {
+            spin_accel: 0.5,
+            spin_w_min: 0.3,
+            ..Default::default()
+        };
+        // far from the goal: w_spin (sqrt(2 x 0.5 x 2.97) > 1)
+        assert_eq!(turns(slow.clone(), &[0.0], &[170.0], 0.0), [1.0]);
+        // nearer: sqrt(2 a |angle to go|), down to spin_w_min
+        let (p, mut latch) = (slow, None);
+        let at = |deg: f64| (2.0 * 0.5 * deg.to_radians()).sqrt();
+        assert_eq!(
+            turn(&p, &mut latch, 0.0, 30f64.to_radians(), 1.0),
+            (0.0, at(30.0))
+        );
+        assert_eq!(
+            turn(&p, &mut latch, 0.0, -10f64.to_radians(), -1.0),
+            (0.0, -at(10.0))
+        );
+        assert_eq!(turn(&p, &mut latch, 0.0, 2f64.to_radians(), 1.0), (0.0, 0.3)); // the floor
+        assert_eq!(latch, None); // no latch without spin_flip_deg
+                                 // the prototype: w_spin whatever is left
+        let p = ExploreParams::default();
+        assert_eq!(turn(&p, &mut latch, 0.0, 2f64.to_radians(), 1.0), (0.0, 1.0));
     }
 
     /// Counts the blocks, and then asks to turn right.
@@ -508,13 +700,13 @@ mod tests {
         let mut goals = Blocked(0);
         for k in 0..=10 {
             assert_eq!(
-                c.step(&mut goals, k as f64 * 0.1, HERE, Some(&sc), &grid, 0.0, None),
+                c.step(&mut goals, k as f64 * 0.1, HERE, Some(&sc), &grid, 0.0, 0.0, None),
                 (0.0, 0.0)
             );
         }
         assert_eq!(c.blocked_since, Some(0.0));
         assert_eq!(
-            c.step(&mut goals, 1.1, HERE, Some(&sc), &grid, 0.0, None),
+            c.step(&mut goals, 1.1, HERE, Some(&sc), &grid, 0.0, 0.0, None),
             (0.0, -1.0)
         );
         assert_eq!(
@@ -528,9 +720,9 @@ mod tests {
         let mut c = ArcController::new(ExploreParams::default(), SafetyParams::default()).unwrap();
         let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
         let mut goal = FixedGoal(0.0);
-        let (v, _) = c.step(&mut goal, 0.0, HERE, Some(&open()), &grid, 0.0, None);
+        let (v, _) = c.step(&mut goal, 0.0, HERE, Some(&open()), &grid, 0.0, 0.0, None);
         assert!(v > 0.0 && c.blocked_since == Some(0.0)); // asks to go, but the base is not moving
-        c.step(&mut goal, 0.1, HERE, Some(&open()), &grid, 0.2, None);
+        c.step(&mut goal, 0.1, HERE, Some(&open()), &grid, 0.2, 0.0, None);
         assert_eq!(c.blocked_since, None);
     }
 }
