@@ -128,7 +128,17 @@ same masks:
 
 The scan is 1.35 ms of it (median); the navigator's step 0.02 to 0.06 ms (p95 0.7 ms, a step with a plan).
 `step_mask` saves nothing measurable over `scan` + `step`: the runtime uses the two calls, which keeps their
-times apart in the run log. Not measured on the CM4 yet.
+times apart in the run log.
+
+On the robot (Raspberry Pi CM4, robot daemon running), same bench, ms per frame, median / p95 / max:
+
+| Sequence | `FreeSpace.scan` | `Navigator.step` | scan + step |
+|----------|------------------|------------------|-------------|
+| exploration, cluttered room | 8.77 / 10.94 / 12.95 | 0.17 / 3.85 / 5.42 | 9.26 / 12.69 / 16.23 |
+| exploration, corridor and doorway | 8.70 / 11.32 / 12.49 | 0.35 / 3.56 / 4.91 | 9.27 / 12.29 / 15.74 |
+| forward toward a box | 12.15 / 12.47 / 13.03 | 0.17 / 0.40 / 0.55 | 12.33 / 12.66 / 13.22 |
+
+The prototype's live loop measured 37 ms (scan) + 46 ms (navigation, p95 78 ms) per frame on the same CM4.
 
 ## Wheel for the robot (aarch64)
 
