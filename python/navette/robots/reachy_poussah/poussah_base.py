@@ -147,6 +147,7 @@ class PoussahBase:
         sits = post and nav.st == pl.STOPPED and not self._stood
         if not sits:
             self.link.sit()
+            self._sitting_down, self._sat_at = True, None  # as after its own stop: no S0 until it has landed
         self._stood = False
         return True
 

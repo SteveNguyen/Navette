@@ -184,6 +184,22 @@ def test_start_refused_while_the_base_sits_down_after_its_own_stop():
     assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
 
 
+def test_start_right_after_our_own_park_waits_for_the_landing():
+    """STOP sits the base (S1); a START pressed while it lands would get "tilt filter off": refused until it
+    has been on its rest SIT_SETTLE_S."""
+    r = Rig()
+    r.drive()
+    r.ctrl.stop()
+    r.still()
+    assert r.sent()[-1] == "S1"
+    r.step(st=3)
+    r.step(st=0)
+    ok, msg = r.ctrl.start()
+    assert not ok and "sitting down" in msg
+    r.step(dt=pb.SIT_SETTLE_S, st=0)
+    assert r.ctrl.start()[0]
+
+
 def test_driving_only_once_the_base_names_us_controller():
     """Claim not answered (no controller bit in [nav]): stay STARTING (zeros), never DRIVING."""
     r = Rig(st=2, link_name="ble", f=7)
