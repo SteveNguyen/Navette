@@ -8,6 +8,7 @@ for the regression tests.
 ## Goals
 
 1. **Light.** One navigation step (floor mask -> command) under 10 ms on the CM4 (the prototype: 83 ms median).
+   On a laptop: 1.4 ms median against the prototype's 2.9 to 3.8 (README, Bench); the CM4 is phase 6.
 2. **Generic.** Nothing robot-specific in the core. One config file per robot; camera, IMU and base behind
    small interfaces with a written contract and a conformance test suite.
 3. **No behaviour regression.** Same outputs as the prototype on the same inputs, checked by tests.
@@ -26,6 +27,8 @@ navette/
     src/velocity_smoother.rs   resume gate (stop at once, restart after n clear steps)
     src/state_estimation/      attitude ('up' from the IMU), tilt_trust (range trust of a balancing base)
     src/exploration/frontier.rs  frontier planner (Dijkstra, distance transform, labelling)
+    src/exploration/frontier_explore.rs  exploration behaviour: the arc controller along the planner's path,
+                               look-around, recovery when blocked
     src/controller/dwa.rs      arc sampling and scoring
     src/navigator.rs           one step: grid -> behaviour -> collision monitor -> smoother
   crates/navette-py/         PyO3 bindings (abi3 wheel), module navette._core
@@ -37,8 +40,8 @@ navette/
     robots/reachy_poussah/     camera + floor model + head IMU (Reachy Mini SDK), Poussah BLE base driver
     testing/                   fake robot, conformance tests any adapter can be run against
   robots/reachy_poussah.toml robot config (footprint, speeds, latency, decel, camera height, calibration)
-  tests/                     pytest: unit tests, golden tests, closed-loop tests
-  benches/                   step timing
+  tests/                     pytest: unit tests, golden tests, closed-loop tests, end to end on the fake robot
+  benches/                   timing of each module and of the whole step
 ```
 
 Names follow Nav2 where it has an equivalent (scan, occupancy grid, collision monitor, velocity smoother,
@@ -51,7 +54,9 @@ Out of scope: simulation, calibration, data collection and model training tools.
 - **Rust core, Python shell.** Camera, robot SDK, BLE and the floor model stay in Python; everything between
   the mask and the command is Rust. Later the loop itself can move to Rust without changing the core.
 - **Two binding levels.** Per-module classes (numpy in / out) for tests and tools, and `Navigator.step(...)`,
-  one call per frame, for the robot loop.
+  one call per frame, for the robot loop. The loop calls `FreeSpace.scan` then `Navigator.step`:
+  `Navigator.step_mask` (both in one call) measured no faster, and two calls keep their times apart in the
+  run log.
 - **Lens model outside the core.** The core takes per-pixel viewing rays (N x 3), computed once by the
   adapter. Any lens works, and the core needs no OpenCV.
 - **The floor model sits behind `Camera`** (the adapter returns a mask): a robot with a depth camera or a
@@ -64,19 +69,20 @@ Out of scope: simulation, calibration, data collection and model training tools.
 
 | Interface | Methods | Contract |
 |---|---|---|
-| `Camera` | `read() -> (t, floor_mask)`, `rays` | bool mask; per-pixel rays; `t` = capture time, monotonic clock |
+| `Camera` | `read() -> Frame` (`t`, `index`, `T_base_cam`), `segment(frame) -> floor mask`, `rays`, `rays_low`, `mask_shape` | bool mask; per-pixel rays; `t` = capture time, monotonic clock |
 | `Imu` | `read() -> [(t, gyro, acc)]` | camera frame, rad/s, m/s^2, all samples since the last call |
-| `Base` | `odometry() -> (t, x, y, theta, v, w)`, `command(v, w)`, `start()`, `stop()`, `status()` | x forward, theta counter-clockwise, m, rad; the base stops by itself when commands stop (dead-man); faults are reported |
-| `Head` (optional) | look down / back | only for robots with a movable camera |
+| `Base` | `odometry() -> (t, x, y, theta, v, w)`, `command(v, w)`, `start()`, `stop()`, `park()`, `status()`, `balancing` | x forward, theta counter-clockwise, m, rad; the base stops by itself when commands stop (dead-man); faults are reported |
+| `Head` (optional) | `look_down()`, `look_back()`, `is_back()` | only for robots with a movable camera |
 
-A new robot = these classes + a config file, validated by `navette.testing`'s conformance tests.
+A new robot = these classes + a config file, validated by `navette.testing`'s conformance checks (README,
+Adding a robot).
 
 ## Localization and SLAM
 
 Today the pose is the base's odometry and the map is an occupancy grid in the odometry frame. The final goal
 is SLAM and localization on top; whether it fits on the CM4 is open. What the design keeps ready for it:
 
-- **The pose has one source, behind an interface** (`localization/`): odometry now, gyro-fused heading next,
+- **The pose has one source, behind an interface** (`runtime/localization.py`): odometry now, gyro-fused heading next,
   a SLAM pose later. Nothing else in the stack reads the wheels directly.
 - **Frames as REP 105**: `odom` (continuous, drifts) and `map` (corrected, may jump). The grid lives in `map`;
   with no SLAM, `map` = `odom`. The collision monitor only uses the robot frame, so a pose jump cannot make
@@ -96,26 +102,34 @@ Not built now: no SLAM code, no map persistence.
    tests/golden/). Exact for booleans, indices and states; 1e-6 for f64; 1e-4 for values that go through f32.
 3. **Golden sequences, end to end.** A synthetic 2-D room (ray-cast scans, seeded) driven closed-loop by the
    prototype; the recorded per-step inputs are replayed through the Navigator and every output compared.
-   Planner ties (Dijkstra predecessors, argmin) may differ: the test demands the same collision-monitor
-   output for the same request on every step and the same state sequence; any tolerated difference is listed
-   explicitly in the test, not hidden by a loose threshold.
+   Exact on every step, the planner's ties included (Dijkstra predecessors and the cheapest frontier follow
+   the prototype's order): command, request, state, target, path length, frontier size, and the final grid
+   bit for bit. No step is exempted.
 4. **Closed-loop properties** in the 2-D room with Navette driving: no collision, exploration finishes,
    coverage within a few percent of the reference.
-5. **Real runs (local only).** If `NAVETTE_RUNS` points at recorded robot runs, replay them and compare.
-   Skipped otherwise. Recorded frames are private and never committed.
-6. **Rust unit tests** (`cargo test`) for the core's own invariants.
-7. **Adapter conformance tests** against the fake robot (units, signs, timestamps, dead-man).
+5. **End to end, no hardware** (`tests/test_end_to_end.py`): the runtime's loop and controller with the real
+   Navigator and UpFilter on the fake robot, whose camera renders the floor mask of a simulated room: START
+   explores without collision, to its end; STOP, stale perception and a silent page stop it; the forward
+   behaviour stops before a box.
+6. **Real runs (local only)** (`tests/test_real_runs.py`). If `NAVETTE_RUNS` points at recorded robot runs:
+   the core on the prototype's replay inputs, the runtime's replay against the prototype's replay step by
+   step, and against what the robot logged. Skipped otherwise. Recorded frames are private and never
+   committed. On the 4 runs recorded with their frames (8559 steps): every output, plan and final grid
+   identical to the prototype's replay; 4 scans differ in one sector by 1 to 7 mm (a pixel within one float32
+   ulp of a sector boundary: numpy's float32 arctan2 is not correctly rounded, libm's is).
+7. **Rust unit tests** (`cargo test`) for the core's own invariants.
+8. **Adapter conformance tests** against the fake robot (units, signs, timestamps, dead-man).
 
 ## Phases
 
-| # | Work | Verified by |
-|---|------|-------------|
-| 0 | Repo, workspace, bindings build, geometry + scan | cargo test, pytest, scan goldens |
-| 1 | occupancy_grid; collision_monitor + velocity_smoother; state_estimation (in parallel) | unit tests + goldens |
-| 2 | exploration/frontier, controller/dwa, navigator | goldens, golden sequences, closed loop |
-| 3 | Python runtime: config, interfaces, loop + controller, replay, phone page, Poussah driver, Reachy adapter, conformance tests | runtime tests with the fake robot |
-| 4 | Benchmarks, aarch64 wheel | bench report |
-| 5 | Independent review, fixes | review findings closed |
-| 6 | On the robot: timing, then the staged live tests again | needs a go |
+| # | Work | Verified by | Status |
+|---|------|-------------|--------|
+| 0 | Repo, workspace, bindings build, geometry + scan | cargo test, pytest, scan goldens | done |
+| 1 | occupancy_grid; collision_monitor + velocity_smoother; state_estimation (in parallel) | unit tests + goldens | done |
+| 2 | exploration/frontier, controller/dwa, navigator | goldens, golden sequences, closed loop | done |
+| 3 | Python runtime: config, interfaces, loop + controller, replay, phone page, Poussah driver, Reachy adapter, conformance tests | runtime tests with the fake robot | done |
+| 4 | Integration: the runtime on the real core, end to end without hardware, replay of real runs against the prototype; benchmarks; aarch64 wheel | end-to-end tests, real-run comparison, bench table (README) | done; the wheel is built and inspected, not run on an aarch64 machine yet |
+| 5 | Independent review, fixes | review findings closed | under way |
+| 6 | On the robot: conformance checks, timing, then the staged live tests again | needs a go | not started |
 
-Phases 1 and 3 run in parallel after phase 0.
+Phases 1 and 3 ran in parallel after phase 0.

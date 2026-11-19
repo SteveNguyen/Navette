@@ -17,7 +17,7 @@ PARAMS = ("tau_s", "bias_tau_s", "acc_gate", "g", "history_s", "still_rate", "st
           "still_bias_tau_s", "rate_tau_s")
 
 (PATH,) = golden_files("attitude")
-G = np.load(PATH)
+G = dict(np.load(PATH))  # read once: an NpzFile decompresses an array again at every access
 STREAMS = range(len(G["names"]))
 
 

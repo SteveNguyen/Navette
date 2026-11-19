@@ -289,7 +289,7 @@ fn drive_mask<'py>(
     PyArray1::from_vec(py, m).reshape(p_floor.shape())
 }
 
-/// floor_seg logits (C, H, W) float32 -> (floor prob, under prob or None). Floor = softmax over channels 0-1
+/// Floor model logits (C, H, W) float32 -> (floor prob, under prob or None). Floor = softmax over channels 0-1
 /// only; a 3-channel model's channel 2 is the 'under' logit, read with a sigmoid.
 #[pyfunction]
 #[allow(clippy::type_complexity)]

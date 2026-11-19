@@ -8,8 +8,8 @@
 //! non-floor pixel is the obstacle distance.
 //!
 //! Limit: obstacles are found where they touch the floor; overhangs (chair seat, sofa edge) are missed,
-//! unless the mask already excludes the floor under them (floor_seg 'under' output, [`drive_mask`]): then the
-//! under region's near edge, where the overhang starts, is the obstacle.
+//! unless the mask already excludes the floor under them (the floor model's 'under' output,
+//! [`drive_mask`]): then the under region's near edge, where the overhang starts, is the obstacle.
 //!
 //! Numerics follow the Python prototype (numpy), so that its outputs are reproduced: the ray rotation is f64, the projection
 //! (range, bearing) f32, the scan arrays f64.
@@ -390,9 +390,9 @@ pub fn drive_mask(p_floor: &[f32], p_under: Option<&[f32]>, thr: f32, under_thr:
     }
 }
 
-/// floor_seg logits (C channels of `px` pixels each, channel-major) -> (floor prob, under prob or None).
-/// Floor = softmax over channels 0-1 only; a 3-channel model's channel 2 is the 'under' logit
-/// (FloorNet(under=True)), read with a sigmoid.
+/// Floor model logits (C channels of `px` pixels each, channel-major) -> (floor prob, under prob or None).
+/// Floor = softmax over channels 0-1 only; a 3-channel model's channel 2 is the 'under' logit (floor with
+/// something low above it), read with a sigmoid.
 pub fn seg_probs(z: &[f32], px: usize) -> (Vec<f32>, Option<Vec<f32>>) {
     let (z0, z1) = (&z[..px], &z[px..2 * px]);
     let floor = z0
