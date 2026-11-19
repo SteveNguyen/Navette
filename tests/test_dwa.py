@@ -112,6 +112,26 @@ def test_turn_ends_on_the_predicted_heading_and_slows_down():
     assert w == 1.0
 
 
+def test_blocked_only_without_progress():
+    # no admissible arc, nothing applied, the robot creeping 2 cm per step: blocked after 1 s by the
+    # prototype's rule, never by the progress rule (5 cm counts); standing still, blocked after blocked_s
+    sc = scan(lambda b: 0.2, fov=181, closest=0.15)
+
+    def first_block(p, dx):
+        ex = ArcController(p)
+        for k in range(60):
+            ex.step(k * 0.1, (dx * k, 0, 0), sc, OccupancyGrid(), 0.0, 0.0)
+            if ex.state == "SPIN":
+                return k
+        return None
+
+    progress = ExploreParams(blocked_progress=True, blocked_s=3.0)
+    assert (progress.progress_m, progress.progress_deg) == (0.05, 17.0) and not ExploreParams().blocked_progress
+    assert first_block(ExploreParams(), 0.02) == 11
+    assert first_block(progress, 0.02) is None
+    assert first_block(progress, 0.0) == 31
+
+
 def test_map_obstacles_count_as_the_scan_s():
     # open scan, but the map holds a wall 0.28 m ahead: too close to stop from cruise speed
     grid = OccupancyGrid(size_m=6.0)

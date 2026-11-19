@@ -165,6 +165,10 @@ inputs the prototype handled unsafely, and on purpose:
     of a turn on heading + measured yaw rate x `spin_lead_s` (the command takes effect ~0.4-0.9 s after the
     frame). `spin_accel` > 0 slows the turn near its end, |w| = min(w_spin, max(`spin_w_min`,
     sqrt(2 `spin_accel` angle))), as Nav2's rotation shim.
+  - `blocked_progress` (`controller/dwa.rs`): blocked only after `blocked_s` without progress (moved
+    `progress_m` or turned `progress_deg` since the last progress mark, a rotation counting: Nav2's pose
+    progress checker), instead of `blocked_s` without an admissible arc or below `moving_v`. With 1 s of the
+    latter, every short hesitation of the arcs started a recovery turn (reference robot: `blocked_s` 3 s).
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

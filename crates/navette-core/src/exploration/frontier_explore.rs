@@ -232,6 +232,7 @@ impl FrontierExplore {
         self.looked = 0.0;
         if matches!(c.state, State::Done | State::Look) {
             c.state = State::Drive;
+            c.progress = None; // a fresh start: the time spent looking or done is not "no progress"
         }
         c.step(
             &mut self.goals,

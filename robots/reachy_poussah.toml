@@ -67,6 +67,14 @@ spin_flip_deg = 45.0
 spin_lead_s = 0.5
 spin_accel = 0.5
 spin_w_min = 0.3
+# Blocked (-> recovery turn) only after blocked_s without progress: moved progress_m or turned progress_deg (~0.3
+# rad) since the last progress, a rotation counting (Nav2's pose progress checker). The core default is 1 s without
+# an admissible arc or below 0.05 m/s: on this robot every short hesitation of the arcs started a recovery turn
+# away from the path (15 in 4 minutes), each followed by a turn back.
+blocked_s = 3.0
+blocked_progress = true
+progress_m = 0.05
+progress_deg = 17.0
 
 [behaviour]
 default = "explore"

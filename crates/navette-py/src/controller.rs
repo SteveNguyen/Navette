@@ -34,6 +34,10 @@ use crate::scan::PyScan;
 ///   spin_accel       rad/s^2, slow down before the end of a turn in place: |w| = min(w_spin, max(spin_w_min,
 ///                    sqrt(2 spin_accel |angle to go|))); 0: always w_spin (the prototype)
 ///   spin_w_min       rad/s, the lowest yaw rate of that slowdown (> 0)
+///   blocked_progress blocked only after blocked_s without progress: moved progress_m or turned progress_deg
+///                    since the last progress (a rotation counts); False: after blocked_s without an
+///                    admissible arc or below moving_v (the prototype)
+///   progress_m, progress_deg   m, deg: progress
 /// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap, w_spin or
 /// spin_w_min <= 0,
 /// a negative or non-finite value): at construction, and where the parameters are used (the attributes can
@@ -60,6 +64,9 @@ pub struct PyExploreParams {
     spin_lead_s: f64,
     spin_accel: f64,
     spin_w_min: f64,
+    blocked_progress: bool,
+    progress_m: f64,
+    progress_deg: f64,
 }
 
 impl PyExploreParams {
@@ -85,6 +92,9 @@ impl PyExploreParams {
             spin_lead_s: self.spin_lead_s,
             spin_accel: self.spin_accel,
             spin_w_min: self.spin_w_min,
+            blocked_progress: self.blocked_progress,
+            progress_m: self.progress_m,
+            progress_deg: self.progress_deg,
         };
         p.validate().map_err(param_err)?;
         Ok(p)
@@ -111,6 +121,9 @@ impl PyExploreParams {
             spin_lead_s: p.spin_lead_s,
             spin_accel: p.spin_accel,
             spin_w_min: p.spin_w_min,
+            blocked_progress: p.blocked_progress,
+            progress_m: p.progress_m,
+            progress_deg: p.progress_deg,
         }
     }
 }
@@ -121,7 +134,8 @@ impl PyExploreParams {
     #[pyo3(signature = (v_set=vec![0.1, 0.2, 0.3], w_max=1.2, n_w=13, horizon_s=1.0, k_heading=1.0, k_clear=0.6,
                         k_speed=0.3, clear_cap=1.0, spin_above_deg=70.0, spin_done_deg=20.0, w_spin=1.0,
                         blocked_s=1.0, rotate_in_place=false, moving_v=0.05, near_known=false, spin_flip_deg=0.0,
-                        spin_lead_s=0.0, spin_accel=0.0, spin_w_min=0.3))]
+                        spin_lead_s=0.0, spin_accel=0.0, spin_w_min=0.3, blocked_progress=false,
+                        progress_m=0.05, progress_deg=17.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         v_set: Vec<f64>,
@@ -143,6 +157,9 @@ impl PyExploreParams {
         spin_lead_s: f64,
         spin_accel: f64,
         spin_w_min: f64,
+        blocked_progress: bool,
+        progress_m: f64,
+        progress_deg: f64,
     ) -> PyResult<Self> {
         let p = Self {
             v_set,
@@ -164,6 +181,9 @@ impl PyExploreParams {
             spin_lead_s,
             spin_accel,
             spin_w_min,
+            blocked_progress,
+            progress_m,
+            progress_deg,
         };
         p.to_core()?;
         Ok(p)
@@ -174,7 +194,8 @@ impl PyExploreParams {
             "ExploreParams(v_set={:?}, w_max={:?}, n_w={}, horizon_s={:?}, k_heading={:?}, k_clear={:?}, \
              k_speed={:?}, clear_cap={:?}, spin_above_deg={:?}, spin_done_deg={:?}, w_spin={:?}, \
              blocked_s={:?}, rotate_in_place={}, moving_v={:?}, near_known={}, spin_flip_deg={:?}, \
-             spin_lead_s={:?}, spin_accel={:?}, spin_w_min={:?})",
+             spin_lead_s={:?}, spin_accel={:?}, spin_w_min={:?}, blocked_progress={}, \
+             progress_m={:?}, progress_deg={:?})",
             self.v_set,
             self.w_max,
             self.n_w,
@@ -193,7 +214,10 @@ impl PyExploreParams {
             self.spin_flip_deg,
             self.spin_lead_s,
             self.spin_accel,
-            self.spin_w_min
+            self.spin_w_min,
+            if self.blocked_progress { "True" } else { "False" },
+            self.progress_m,
+            self.progress_deg
         )
     }
 }

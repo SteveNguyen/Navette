@@ -67,6 +67,11 @@ class Explore:
     spin_lead_s: float    # s, the end of a turn in place is tested on heading + measured yaw rate x this
     spin_accel: float     # rad/s^2, slow down before the end of a turn in place (sqrt(2 a angle)); 0 = off
     spin_w_min: float     # rad/s, the lowest yaw rate of that slowdown (> 0)
+    blocked_s: float      # s: blocked (recovery) after this long without an admissible arc / without progress
+    blocked_progress: bool  # blocked only without progress (moved progress_m or turned progress_deg); false: the
+    #                         prototype's rule, no admissible arc or no motion
+    progress_m: float     # m
+    progress_deg: float   # deg
 
 
 @dataclass(frozen=True)

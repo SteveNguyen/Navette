@@ -83,6 +83,16 @@ pub struct ExploreParams {
     pub spin_accel: f64,
     /// Lowest yaw rate (rad/s) of that slowdown, so that a turn never stalls.
     pub spin_w_min: f64,
+    /// Blocked only after `blocked_s` without progress (false: without an admissible arc or below `moving_v`,
+    /// the prototype). Progress: the pose moved `progress_m` or turned `progress_deg` since the last progress
+    /// mark (Nav2's pose progress checker: a rotation counts). Why: with 1 s of no admissible arc the real
+    /// robot started a recovery turn on every short hesitation of the arcs (15 blocks in 4 minutes), each
+    /// one a turn away from the path and back.
+    pub blocked_progress: bool,
+    /// Progress (m),
+    pub progress_m: f64,
+    /// or (deg).
+    pub progress_deg: f64,
 }
 
 impl Default for ExploreParams {
@@ -107,6 +117,9 @@ impl Default for ExploreParams {
             spin_lead_s: 0.0,
             spin_accel: 0.0,
             spin_w_min: 0.3,
+            blocked_progress: false,
+            progress_m: 0.05,
+            progress_deg: 17.0, // ~0.3 rad
         }
     }
 }
@@ -136,6 +149,8 @@ impl ExploreParams {
             ("spin_flip_deg", self.spin_flip_deg),
             ("spin_lead_s", self.spin_lead_s),
             ("spin_accel", self.spin_accel),
+            ("progress_m", self.progress_m),
+            ("progress_deg", self.progress_deg),
         ] {
             params::non_negative(&format!("ExploreParams.{name}"), value)?;
         }
@@ -230,10 +245,12 @@ pub struct ArcController {
     pub goal: Option<f64>,
     /// Drive or Spin. The behaviour on top may set its own states (Look, Done) between steps.
     pub state: State,
-    /// Since when (s) there has been no admissible arc or no motion.
+    /// Since when (s) there has been no admissible arc or no motion (`blocked_progress`: no progress).
     pub blocked_since: Option<f64>,
     /// The latched turn in place under way (`spin_flip_deg` > 0), None when not turning.
     pub turn: Option<Turn>,
+    /// With `blocked_progress`: the time and pose of the last progress (None: from the next step on).
+    pub progress: Option<(f64, Pose2)>,
 }
 
 impl ArcController {
@@ -248,6 +265,7 @@ impl ArcController {
             state: State::Drive,
             blocked_since: None,
             turn: None,
+            progress: None,
         })
     }
 
@@ -271,6 +289,16 @@ impl ArcController {
         let goal = goals.choose_goal(t, pose, grid);
         self.goal = Some(goal);
         let (p, s) = (&self.params, &self.safety);
+        if p.blocked_progress {
+            // a new progress mark once the robot moved or turned enough since the last one
+            let moved = self.progress.is_none_or(|(_, m)| {
+                (pose.x - m.x).hypot(pose.y - m.y) >= p.progress_m
+                    || wrap_angle(pose.theta - m.theta).abs() >= p.progress_deg.to_radians()
+            });
+            if moved {
+                self.progress = Some((t, pose));
+            }
+        }
         let err = wrap_angle(goal - pose.theta);
         // the end of a turn is tested on the heading the robot will have when this command takes effect
         let err_end = if p.spin_lead_s > 0.0 {
@@ -325,7 +353,9 @@ impl ArcController {
             self.blocked_since = None;
             return turn(p, &mut self.turn, goal, err, dir0);
         }
-        if best.is_some() && v_applied >= p.moving_v {
+        if p.blocked_progress {
+            self.blocked_since = self.progress.map(|(since, _)| since); // no progress since then
+        } else if best.is_some() && v_applied >= p.moving_v {
             self.blocked_since = None;
         } else if self.blocked_since.is_none() {
             self.blocked_since = Some(t);
@@ -334,6 +364,9 @@ impl ArcController {
             // this way is blocked: pick another goal and turn to it
             goals.on_blocked(t, pose);
             self.blocked_since = None;
+            if p.blocked_progress {
+                self.progress = Some((t, pose)); // the recovery starts the count again
+            }
             let goal = goals.choose_goal(t, pose, grid);
             self.goal = Some(goal);
             self.state = State::Spin;
@@ -672,6 +705,59 @@ mod tests {
                                  // the prototype: w_spin whatever is left
         let p = ExploreParams::default();
         assert_eq!(turn(&p, &mut latch, 0.0, 2f64.to_radians(), 1.0), (0.0, 1.0));
+    }
+
+    /// The steps at which the controller declared a block, over `n` steps 0.1 s apart from `pose_at(k)`,
+    /// with no admissible arc (obstacle at 0.2 m all around) and nothing applied (v_applied = 0).
+    fn blocks(params: ExploreParams, n: usize, pose_at: impl Fn(usize) -> Pose2) -> Vec<usize> {
+        let sc = scan(|_| 0.2, 181.0, 0.15);
+        let mut c = ArcController::new(params, SafetyParams::default()).unwrap();
+        let grid = OccupancyGrid::new(OccupancyGridParams::default()).unwrap();
+        let mut goals = Blocked(0);
+        (0..n)
+            .filter(|&k| {
+                let before = goals.0;
+                c.step(
+                    &mut goals,
+                    k as f64 * 0.1,
+                    pose_at(k),
+                    Some(&sc),
+                    &grid,
+                    0.0,
+                    0.0,
+                    None,
+                );
+                goals.0 > before
+            })
+            .collect()
+    }
+
+    fn progress() -> ExploreParams {
+        ExploreParams {
+            blocked_progress: true,
+            blocked_s: 3.0,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn blocked_only_after_blocked_s_without_progress() {
+        let still = |_| HERE;
+        // the prototype: blocked 1 s after the arcs ran out (then a recovery turn, spinning to its goal)
+        assert_eq!(blocks(ExploreParams::default(), 12, still)[0], 11);
+        // progress: blocked after 3 s without moving 5 cm or turning 17 deg
+        assert_eq!(blocks(progress(), 40, still)[0], 31);
+        // creeping 2 cm per step (no admissible arc, nothing applied): the prototype is blocked, not the
+        // progress rule
+        let creep = |k: usize| Pose2::new(0.02 * k as f64, 0.0, 0.0);
+        assert_eq!(blocks(ExploreParams::default(), 12, creep), [11]);
+        assert!(blocks(progress(), 100, creep).is_empty());
+        // turning 0.1 rad per step counts too (Nav2's pose progress checker)
+        let turning = |k: usize| Pose2::new(0.0, 0.0, wrap_angle(0.1 * k as f64));
+        assert!(blocks(progress(), 100, turning).is_empty());
+        // turning back and forth by 10 deg is no progress
+        let dither = |k: usize| Pose2::new(0.0, 0.0, if k.is_multiple_of(2) { 0.0 } else { 0.17 });
+        assert_eq!(blocks(progress(), 40, dither)[0], 31);
     }
 
     /// Counts the blocks, and then asks to turn right.

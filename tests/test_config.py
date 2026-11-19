@@ -33,6 +33,8 @@ def test_reachy_poussah_values():
     assert cfg.explore.near_known is True
     assert (cfg.explore.spin_flip_deg, cfg.explore.spin_lead_s, cfg.explore.spin_accel, cfg.explore.spin_w_min) == (
         45.0, 0.5, 0.5, 0.3)
+    assert (cfg.explore.blocked_s, cfg.explore.blocked_progress, cfg.explore.progress_m, cfg.explore.progress_deg) == (
+        3.0, True, 0.05, 17.0)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -85,6 +87,9 @@ def edited(tmp_path, old, new, count=1):
     (r"^spin_w_min = 0.3$", "spin_w_min = 0.0", r"\[explore\] spin_w_min = 0.0: must be finite and > 0"),
     (r"^spin_lead_s = 0.5$", "spin_lead_s = -0.5", r"\[explore\] spin_lead_s = -0.5: must be finite and >= 0"),
     (r"^spin_flip_deg = 45.0$", "spin_flip_deg = nan", r"\[explore\] spin_flip_deg = nan"),
+    (r"^blocked_progress = true$", "blocked_progress = 0", r"\[explore\] blocked_progress = 0: expected bool"),
+    (r"^progress_m = 0.05$", "progress_m = -0.05", r"\[explore\] progress_m = -0.05: must be finite and >= 0"),
+    (r"^blocked_s = 3.0$", "blocked_s = inf", r"\[explore\] blocked_s = inf"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),
