@@ -69,7 +69,8 @@ config (for the Reachy Mini: the floor model and three calibration files, see `r
     python -m navette.runtime --robot robots/reachy_poussah.toml --out RUNS --dry-run --no-base
     python -m navette.runtime --robot robots/reachy_poussah.toml --out RUNS
 
-Nothing moves before START on the status page (`http://<robot>:8090/`); STOP, a watchdog (stale perception,
+(`pip install --no-deps <wheel>` leaves the environment's own numpy, OpenCV... untouched, if the robot's
+SDK already brings them.) Nothing moves before START on the status page (`http://<robot>:8090/`); STOP, a watchdog (stale perception,
 base fault, page silent) or the end of the exploration stops the base. `--dry-run`: everything runs, nothing
 is sent to the base; `--no-base`: no base at all. `--behaviour forward` drives straight through the collision
 monitor instead of exploring. Each run writes a folder (`RUNS/<date-time>/`: frames, IMU, base lines,
