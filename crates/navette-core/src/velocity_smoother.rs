@@ -4,6 +4,10 @@
 //! On the robot, one noisy frame flipped v between 0 and the request 78 times in 90 s. Stops are never
 //! delayed; the base's own acceleration ramp does the smoothing (Nav2: velocity smoother before the collision
 //! monitor, so stops are immediate and starts are ramped).
+//!
+//! The gate only counts what it is given. The navigator can make the resume condition stricter than the stop
+//! one (hysteresis: `NavigatorParams::resume_margin`) by giving it, while [`ResumeGate::stopped`], the
+//! collision monitor's answer with a wider margin.
 
 /// See the module documentation. One gate per command stream; call [`ResumeGate::step`] once per frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

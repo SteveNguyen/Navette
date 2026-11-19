@@ -67,6 +67,8 @@ class Behaviour:
     default: str      # "explore" (frontier exploration) or "forward" (straight, through the collision monitor)
     forward_v: float  # m/s, the forward behaviour's request
     resume_n: int     # clear steps needed to move again after a stop (velocity smoother)
+    resume_margin: float  # m, restart hysteresis: after a stop, a clear step must also fit with this much more
+    #                       clearance than the collision monitor's margin (0 = none)
 
 
 @dataclass(frozen=True)

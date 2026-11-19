@@ -143,6 +143,13 @@ inputs the prototype handled unsafely, and on purpose:
 - **Navigator** (`navigator.rs`): a step whose scan has no seen sector returns v = 0 (w, the request and the
   state as computed; not a `blind_stop`). The collision monitor, unchanged, puts the boundary of unseen
   sectors at `unseen_m` all round, which lets a robot that sees no floor at all creep forward for ever.
+- **Restart hysteresis** (`navigator.rs`, `resume_margin`; active only when > 0, 0 by default so the goldens
+  are unchanged): after a stop, a step counts toward resuming only if the request also fits with the collision
+  monitor's margin + `resume_margin` (same scan and map), `resume_n` steps in a row; stops stay immediate at
+  the normal margin. A self-balancing base still travels the lag it built after any stop, most after a short
+  burst, and the stop-and-go at the edge of a blocked zone produces such bursts (the reference robot: 0.10 m,
+  `resume_n` 4). Stops decided by the `near` rule (an obstacle off the image bottom that the map does not
+  explain) do not depend on the margin, so the hysteresis does not change them.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

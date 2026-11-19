@@ -24,7 +24,9 @@ def test_reachy_poussah_values():
     assert (cfg.controller.v_max, cfg.controller.w_max, cfg.controller.cmd_hz) == (0.15, 0.5, 20.0)
     assert cfg.controller.start_timeout_s == 10.0 and cfg.perception.imu_max_age_s == 0.1
     assert (cfg.page.port, cfg.page.timeout_s, cfg.page.preview_s) == (8090, 2.0, 2.0)
-    assert (cfg.behaviour.default, cfg.behaviour.forward_v, cfg.behaviour.resume_n) == ("explore", 0.15, 2)
+    assert (cfg.behaviour.default, cfg.behaviour.forward_v) == ("explore", 0.15)
+    # restart hysteresis: stop-and-go bursts overshoot on the balancing base
+    assert (cfg.behaviour.resume_n, cfg.behaviour.resume_margin) == (4, 0.10)
     assert cfg.camera.body_z == 0.325 and cfg.camera.blind_m == 0.5
     assert cfg.explore.v_set == (0.1, 0.2, 0.3)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
@@ -63,7 +65,9 @@ def edited(tmp_path, old, new, count=1):
     (r"^decel = 0.64$", "decel = 0.64\ndecell = 1.0", r"\[safety\]: unknown \['decell'\]"),  # a typo is not ignored
     (r"^decel = 0.64$", 'decel = "0.64"', r"\[safety\] decel = '0.64': expected float"),
     (r"^decel = 0.64$", "decel = true", r"expected float"),
-    (r"^resume_n = 2$", "resume_n = 2.5", r"\[behaviour\] resume_n = 2.5: expected int"),
+    (r"^resume_n = 4$", "resume_n = 2.5", r"\[behaviour\] resume_n = 2.5: expected int"),
+    (r"^resume_margin = 0.10$", "", r"\[behaviour\]: missing \['resume_margin'\]"),
+    (r"^resume_margin = 0.10$", "resume_margin = \"0.1\"", r"\[behaviour\] resume_margin = '0.1': expected float"),
     (r'^default = "explore"$', 'default = "v3"', r"'explore' or 'forward'"),
     (r"^\[page\]$", "[pages]", r"missing tables \['page'\]; unknown tables \['pages'\]"),
     (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = []", r"\[explore\] v_set = \[\]: expected a non-empty list"),
@@ -88,7 +92,10 @@ def edited(tmp_path, old, new, count=1):
     (r"^port = 8090$", "port = 70000", r"\[page\] port = 70000: must be at most 65535"),
     (r"^timeout_s = 2.0$", "timeout_s = -1.0", r"\[page\] timeout_s"),
     (r"^n_frames = 2$", "n_frames = 0", r"\[glance\] n_frames"),
-    (r"^resume_n = 2$", "resume_n = -1", r"\[behaviour\] resume_n"),
+    (r"^resume_n = 4$", "resume_n = -1", r"\[behaviour\] resume_n"),
+    (r"^resume_margin = 0.10$", "resume_margin = -0.1", r"\[behaviour\] resume_margin = -0.1: must be finite and >= 0"),
+    (r"^resume_margin = 0.10$", "resume_margin = nan", r"\[behaviour\] resume_margin = nan"),
+    (r"^resume_margin = 0.10$", "resume_margin = inf", r"\[behaviour\] resume_margin = inf"),
 ])
 def test_bad_config_is_an_error(tmp_path, old, new, message):
     with pytest.raises(ValueError, match=message):

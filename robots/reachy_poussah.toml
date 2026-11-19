@@ -54,7 +54,13 @@ v_set = [0.1, 0.2, 0.3]
 [behaviour]
 default = "explore"
 forward_v = 0.15
-resume_n = 2
+# Restart hysteresis (the core's defaults are 2 and 0.0: no hysteresis). After any stop this balancing base
+# still travels the lag it built (5-9 cm at 0.1 m/s, more right after a start), so short start-stop bursts
+# overshoot most. Stopping and restarting at the edge of a blocked zone produces exactly such bursts: after a
+# stop, the robot moves again only once the request fits with 0.10 m more clearance, resume_n frames in a row
+# (4: about 0.5 s at the ~8 Hz loop). Stops are unchanged.
+resume_n = 4
+resume_margin = 0.10
 
 [controller]
 v_max = 0.15           # cap after the collision monitor

@@ -6,7 +6,9 @@ what the Python prototype reached there:
   - exploration finishes where the prototype's does, within the same step budget;
   - the explored free area is within 5 % of the prototype's;
   - the forward behaviour stops before the box at the distance the collision monitor plans;
-  - a stop caused by the never-seen blind zone is flagged, and a glance clears it.
+  - a stop caused by the never-seen blind zone is flagged, and a glance clears it;
+  - following a box that moves away step by step, the restart hysteresis (resume_margin) turns the sub-second
+    start-stop bursts into fewer, longer ones (not a golden: the prototype had none).
 
 Unlike tests/test_navigator_golden.py (recorded inputs replayed), the loop is closed here: a different command
 changes every later frame.
@@ -112,3 +114,40 @@ def test_blind_stop_is_flagged_and_a_glance_clears_it():
     assert sim.pose[0] > 1.56 + sim.radius  # past the box (x up to 1.56), 0.25 m to its left
     assert summary["min_clearance"] == pytest.approx(0.25, abs=0.01)
     assert summary["travelled"] == pytest.approx(float(g["travelled"]), abs=0.02)  # as the prototype
+
+
+def follow_receding_box(resume_margin):
+    """Forward (0.15 m/s, resume_n = 4 as the reference robot) toward a box that moves 5 cm away every second
+    from t = 1 s: the robot catches up, stops at the edge of the blocked zone, and starts again as the box
+    recedes. Scan alone (odometry=False: a robot at rest adds no keyframe, so with the map a moved box would
+    stay in it), and a camera seeing the floor down to 0.1 m (sim closest), so that the collision monitor's
+    clearance decides the stops, not the near rule (binary, whatever the margin).
+    Returns (burst durations in s: runs of steps with v > 0, the run summary)."""
+    walls, _ = sim2d.room("box")
+    sim = sim2d.Sim(walls, (2.2, 1.5, 0.0), closest=0.1)  # box face 0.8 m ahead
+    box = sim.walls[4:].copy()
+    nav = Navigator(behaviour="forward", odometry=False, resume_n=4, resume_margin=resume_margin)
+
+    def step(t, dt, pose, scan, cam_h, a, v, w, v_prev):
+        out = nav.step(t, dt, pose, Scan(**scan), cam_h, a, v, w, v_prev)
+        sim.walls[4:] = box + np.array([0.05, 0.0, 0.05, 0.0]) * int(t)  # for the next frame
+        return out
+
+    frames, summary = sim2d.run(sim, step, steps=200)
+    moving = np.array([f["out"].v > 0 for f in frames], int)
+    edges = np.flatnonzero(np.diff(np.r_[0, moving, 0]))  # starts and ends of the runs of moving steps
+    return (edges[1::2] - edges[::2]) * sim2d.DT, summary
+
+
+def test_restart_hysteresis_avoids_short_bursts():
+    plain, plain_run = follow_receding_box(0.0)
+    assert not plain_run["collided"]
+    # without it: stop-and-go, a burst under 0.5 s for each 5 cm step of the box (the worst case of a
+    # balancing base, which overshoots most after a short burst)
+    assert len(plain) > 15 and plain[1:].max() < 0.5, plain
+    hyst, hyst_run = follow_receding_box(0.1)
+    assert not hyst_run["collided"]
+    # with 0.10 m: it waits for 10 cm more room (two steps of the box), then drives: no burst under 1 s
+    assert 2 <= len(hyst) < len(plain) / 2 and hyst.min() >= 1.0, hyst
+    # and it keeps up with the box: within the 10 cm it waits for
+    assert hyst_run["travelled"] > plain_run["travelled"] - 0.1

@@ -1,6 +1,7 @@
 """Navigator (map -> frontier exploration -> collision monitor -> resume gate) driving a unicycle in a walled
 room, scans ray-cast (the Python prototype's tests)."""
 
+import itertools
 import math
 
 import numpy as np
@@ -161,6 +162,42 @@ def test_parameters():
         Navigator(behaviour="v3")
     with pytest.raises(ValueError):
         nav.step(0.0, 0.1, pose, Scan([0.0], [True], [1.0], [False], [1.0]), 0.35, 0.0, 0.0, 0.0, 0.0)
+
+
+def wall_scan(d):
+    """A straight wall across the path d m ahead of the centre, floor seen up to it from 0.1 m (never near):
+    the collision monitor's clearance alone decides."""
+    seen = np.abs(BEAR) < FOV
+    free = d / np.cos(np.radians(BEAR))
+    return Scan(BEAR, seen, np.where(seen, free, np.inf), np.zeros(180, bool), np.where(seen, free, 0.0),
+                np.where(seen, 0.1, np.inf))
+
+
+def test_resume_margin_restart_hysteresis():
+    """After a stop, the resume gate counts a step only if the request fits with resume_margin more clearance;
+    stops are unchanged. With the default safety, 0.15 m/s gets some v > 0 from a wall at 0.21 m on (0.31 m
+    with 0.10 m more margin)."""
+    fits, blocked, fits_wider = 0.25, 0.15, 0.35
+    plain = Navigator(behaviour="forward", odometry=False)
+    hyst = Navigator(behaviour="forward", odometry=False, resume_margin=0.1)
+    assert (plain.resume_margin, hyst.resume_margin, hyst.resume_n) == (0.0, 0.1, 2)
+    clock = itertools.count()
+
+    def v(nav, d):
+        return nav.step(next(clock) * 0.1, 0.1, (0.0, 0.0, 0.0), wall_scan(d), 0.35, 0.0, 0.0, 0.0, 0.0).v
+
+    for d in (1.0, 0.5, fits):  # moving toward the wall: no change
+        a, b = v(plain, d), v(hyst, d)
+        assert a > 0 and a == b, d
+    assert (v(plain, blocked), v(hyst, blocked)) == (0.0, 0.0)  # stops: immediate, both
+    assert v(plain, fits) == 0.0 and v(plain, fits) > 0  # plain: resumes after resume_n = 2 steps
+    assert all(v(hyst, fits) == 0.0 for _ in range(20))  # hysteresis: holds where it only fits
+    assert v(hyst, fits_wider) == 0.0 and v(hyst, fits_wider) > 0  # 0.1 m farther: resumes after 2
+    assert v(hyst, fits) > 0  # moving again: the normal margin
+    with pytest.raises(ValueError, match="resume_margin"):
+        Navigator(resume_margin=-0.1)
+    with pytest.raises(ValueError, match="resume_margin"):
+        Navigator(resume_margin=float("nan"))
 
 
 def test_nav_out_is_dataclass_like():

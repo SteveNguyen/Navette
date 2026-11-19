@@ -203,7 +203,9 @@ def test_base_motion_low_passes_the_acceleration():
 def test_reachy_config_gives_the_core_defaults_exactly():
     """Robot geometry and speeds now come from the config (loop.navigator_params). For the reference robot
     they must be, bit for bit, the core's defaults (the parameters of the golden sequences and of every
-    recorded run), plus what its config says of the collision monitor."""
+    recorded run), plus what its config says of the collision monitor, and its resume gate: resume_n and
+    resume_margin differ from the core's defaults (2, 0.0) on purpose (restart hysteresis for the balancing
+    base)."""
     import navette
 
     cfg = config.load(ROBOT_TOML)
@@ -216,7 +218,10 @@ def test_reachy_config_gives_the_core_defaults_exactly():
                                                unseen_m=0.35, reverse_max=0.0, step=0.02, n_speeds=20)
     assert p["frontier"].clear == 0.18 == p["safety"].radius + p["safety"].margin and p["frontier"].blind == 0.5
     nav = loop.new_navigator(cfg, "explore", 0.15, True)
-    assert nav.safety == p["safety"] and (nav.behaviour, nav.resume_n, nav.forward_v) == ("explore", 2, 0.15)
+    assert nav.safety == p["safety"] and (nav.behaviour, nav.forward_v) == ("explore", 0.15)
+    assert (nav.resume_n, nav.resume_margin) == (4, 0.10)
+    core = navette.Navigator()
+    assert (core.resume_n, core.resume_margin) == (2, 0.0)
 
 
 def test_a_bigger_slower_robot_gets_its_own_geometry_and_speeds():

@@ -11,6 +11,7 @@
 //!              -> requested (v, w)
 //! safety       safe_command(v, w, scan, params, grid obstacles, blind_known)
 //! resume gate  ResumeGate::step(v_req, v_ok)                                        -> (v, w) to send
+//!              (while stopped, with resume_margin > 0: v_ok of safe_command with margin + resume_margin)
 //! ```
 //!
 //! Frames: pose = the robot in the fixed frame of the odometry (x forward at start, y left, theta
@@ -24,6 +25,11 @@
 //! at all (looking straight down or up, a wrong 'up', a mask with no ray below the horizon), where the robot
 //! would advance blind for ever, with finite and fresh outputs that trip no watchdog. The rule is here and
 //! not in `safe_command`, whose outputs stay the prototype's.
+//!
+//! Another, active only with `resume_margin > 0` (0 by default): a restart hysteresis. After a stop the
+//! request must fit with `resume_margin` more clearance, `resume_n` steps in a row, before the robot moves
+//! again; stops are unchanged. A self-balancing base still travels the lag it built after any stop, and most
+//! after a short start-stop burst, which the stop-and-go at the edge of a blocked zone produces.
 
 use std::f64::consts::TAU;
 
@@ -67,6 +73,12 @@ pub struct NavigatorParams {
     pub odometry: bool,
     /// Steps allowing forward motion needed to resume after a stop (velocity_smoother).
     pub resume_n: u32,
+    /// Restart hysteresis (m): after a stop, the resume gate counts a step as allowing forward motion only
+    /// if the request fits with the collision monitor's margin increased by this much. Stops stay immediate,
+    /// at the normal margin. 0: no hysteresis (the request is evaluated once, as the prototype).
+    /// Why: a self-balancing base still travels the lag it built after any stop, most after a short burst;
+    /// stop-and-go at the edge of a blocked zone produces exactly such bursts.
+    pub resume_margin: f64,
     /// The forward behaviour's request (m/s).
     pub forward_v: f64,
     pub grid: OccupancyGridParams,
@@ -83,6 +95,7 @@ impl Default for NavigatorParams {
             behaviour: Behaviour::Explore,
             odometry: true,
             resume_n: 2,
+            resume_margin: 0.0,
             forward_v: 0.15,
             grid: OccupancyGridParams::default(),
             frontier: FrontierParams::default(),
@@ -96,13 +109,15 @@ impl Default for NavigatorParams {
 }
 
 impl NavigatorParams {
-    /// The parameters of every part, and finite forward_v and tilt trust parameters.
+    /// The parameters of every part, finite forward_v, finite resume_margin >= 0 and the tilt trust
+    /// parameters.
     pub fn validate(&self) -> Result<(), ParamError> {
         self.safety.validate()?;
         self.grid.validate()?;
         self.frontier.validate()?;
         self.explore.validate()?;
         params::finite("NavigatorParams.forward_v", self.forward_v)?;
+        params::non_negative("NavigatorParams.resume_margin", self.resume_margin)?;
         let t = &self.tilt_trust;
         params::non_negative("TiltTrust.s0", t.s0)?;
         params::positive("TiltTrust.tau_s", t.tau_s)?;
@@ -256,20 +271,23 @@ impl Navigator {
             }
         };
         let mut blind_stop = false;
-        let (v_ok, w_ok, _) = match &known {
-            Some(known) => {
-                let pts = self.grid.obstacle_points(pose, MAP_RANGE_M);
-                let ok = safe_command(v_req, w_req, scan, sp, Some(&pts), Some(known));
+        // the map's obstacles, also for the resume check below
+        let pts = known
+            .as_ref()
+            .map(|_| self.grid.obstacle_points(pose, MAP_RANGE_M));
+        let (v_ok, w_ok, _) = match (&known, &pts) {
+            (Some(known), Some(pts)) => {
+                let ok = safe_command(v_req, w_req, scan, sp, Some(pts), Some(known));
                 let unexplained = (0..scan.len()).any(|k| scan.seen[k] && scan.near[k] && !known[k]);
                 if v_req > 0.0 && ok.0 <= 0.0 && unexplained {
                     // would the request go if the unseen blind segments were known free? then only they
                     // stop it
                     let all = vec![true; scan.len()];
-                    blind_stop = safe_command(v_req, w_req, scan, sp, Some(&pts), Some(&all)).0 > 0.0;
+                    blind_stop = safe_command(v_req, w_req, scan, sp, Some(pts), Some(&all)).0 > 0.0;
                 }
                 ok
             }
-            None => safe_command(v_req, w_req, scan, sp, None, None),
+            _ => safe_command(v_req, w_req, scan, sp, None, None),
         };
         // A robot that sees nothing does not translate (see the module documentation). The gate takes it
         // as any stop; it is not a blind_stop (a look down would not help a camera that sees no floor).
@@ -277,6 +295,20 @@ impl Navigator {
             (v_ok, blind_stop)
         } else {
             (0.0, false)
+        };
+        // Restart hysteresis: separate stop and resume zones. While the gate is stopped, the request must
+        // also fit with resume_margin more clearance (same scan, map points and near_known) for the step to
+        // count toward resuming; a step that fits only with the normal margin counts as blocked. Skipped when
+        // the request is not forward or already cut (a wider margin cannot allow more) and when
+        // resume_margin = 0, so that the outputs stay the prototype's.
+        let v_ok = if self.params.resume_margin > 0.0 && self.gate.stopped() && v_req > 0.0 && v_ok > 0.0 {
+            let wider = SafetyParams {
+                margin: sp.margin + self.params.resume_margin,
+                ..*sp
+            };
+            safe_command(v_req, w_req, scan, &wider, pts.as_deref(), known.as_deref()).0
+        } else {
+            v_ok
         };
         let v_ok = self.gate.step(v_req, v_ok);
         if state != State::Done {
@@ -430,6 +462,8 @@ mod tests {
         assert!(bad(|p| p.frontier.replan_s = f64::NAN).starts_with("FrontierParams.replan_s"));
         assert!(bad(|p| p.explore.v_set.clear()).starts_with("ExploreParams.v_set"));
         assert!(bad(|p| p.forward_v = f64::NAN).starts_with("NavigatorParams.forward_v"));
+        assert!(bad(|p| p.resume_margin = -0.1).starts_with("NavigatorParams.resume_margin"));
+        assert!(bad(|p| p.resume_margin = f64::NAN).starts_with("NavigatorParams.resume_margin"));
         assert!(bad(|p| p.tilt_trust.tau_s = 0.0).starts_with("TiltTrust.tau_s"));
     }
 
@@ -583,6 +617,125 @@ mod tests {
         assert!(nav.grid().keyframes().is_empty() && nav.grid().origin().is_none());
         let out = nav.step(0.0, dt, pose, &room_scan(pose, room), 0.35, 0.0, 0.0, 0.0, 0.0);
         assert!(!out.finished && out.state != State::Done);
+    }
+
+    /// Scan of a straight wall across the path, `d` m ahead of the centre, floor seen up to it from 0.1 m
+    /// (never `near`): the collision monitor's clearance alone decides.
+    fn wall_scan(d: f64) -> Scan {
+        let n = 180;
+        let seen: Vec<bool> = (0..n).map(|k| bearing(k).abs() < 55.0).collect();
+        let free: Vec<f64> = (0..n).map(|k| d / bearing(k).to_radians().cos()).collect();
+        Scan {
+            bearing_deg: (0..n).map(bearing).collect(),
+            obstacle: (0..n)
+                .map(|k| if seen[k] { free[k] } else { f64::INFINITY })
+                .collect(),
+            near: vec![false; n],
+            floor: (0..n).map(|k| if seen[k] { free[k] } else { 0.0 }).collect(),
+            closest: seen
+                .iter()
+                .map(|&s| if s { 0.1 } else { f64::INFINITY })
+                .collect(),
+            seen,
+        }
+    }
+
+    /// Forward without odometry (the scan alone) at 0.15 m/s, with this resume gate.
+    fn forward_resume(resume_n: u32, resume_margin: f64) -> Navigator {
+        Navigator::new(NavigatorParams {
+            behaviour: Behaviour::Forward,
+            odometry: false,
+            resume_n,
+            resume_margin,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn v_at(nav: &mut Navigator, k: usize, d: f64) -> f64 {
+        let pose = Pose2::new(0.0, 0.0, 0.0);
+        nav.step(k as f64 * 0.1, 0.1, pose, &wall_scan(d), 0.35, 0.0, 0.0, 0.0, 0.0)
+            .v
+    }
+
+    // With the default parameters (radius 0.13, margin 0.05) the 0.15 m/s request gets some v > 0 from a wall
+    // at 0.21 m on, none at 0.19; 0.10 m more margin moves that edge by 0.10 m.
+    const FITS: f64 = 0.25; // fits with the margin, not with margin + 0.10
+    const BLOCKED: f64 = 0.15;
+    const FITS_WIDER: f64 = 0.35; // fits with margin + 0.10
+
+    #[test]
+    fn resume_margin_0_is_the_monitor_then_the_gate() {
+        let sp = SafetyParams::default();
+        assert!(safe_command(0.15, 0.0, &wall_scan(0.21), &sp, None, None).0 > 0.0);
+        assert_eq!(safe_command(0.15, 0.0, &wall_scan(0.19), &sp, None, None).0, 0.0);
+        let wider = SafetyParams {
+            margin: sp.margin + 0.1,
+            ..sp
+        };
+        assert!(safe_command(0.15, 0.0, &wall_scan(0.31), &wider, None, None).0 > 0.0);
+        assert_eq!(
+            safe_command(0.15, 0.0, &wall_scan(0.29), &wider, None, None).0,
+            0.0
+        );
+        // a stop-and-go sequence: exactly safe_command then ResumeGate, as before the parameter existed
+        let walls = [
+            1.0, 0.4, FITS, BLOCKED, FITS, FITS, BLOCKED, FITS, 0.6, 0.6, BLOCKED, FITS_WIDER, 1.0,
+        ];
+        let mut nav = forward_resume(2, 0.0);
+        let mut gate = ResumeGate::new(2);
+        for (k, &d) in walls.iter().enumerate() {
+            let want = gate.step(0.15, safe_command(0.15, 0.0, &wall_scan(d), &sp, None, None).0);
+            assert_eq!(v_at(&mut nav, k, d), want, "step {k}");
+        }
+    }
+
+    #[test]
+    fn after_a_stop_the_request_must_fit_with_resume_margin_more() {
+        let (mut plain, mut hyst) = (forward_resume(2, 0.0), forward_resume(2, 0.1));
+        // moving toward the wall: no change, the normal margin decides (immediate stop)
+        for (k, d) in [1.0, 0.5, FITS].into_iter().enumerate() {
+            let v = v_at(&mut plain, k, d);
+            assert!(v > 0.0 && v_at(&mut hyst, k, d) == v, "step {k}");
+        }
+        assert_eq!(
+            (v_at(&mut plain, 3, BLOCKED), v_at(&mut hyst, 3, BLOCKED)),
+            (0.0, 0.0)
+        );
+        // stopped, the wall back where it fitted: the plain gate resumes after 2 steps, the other holds
+        assert_eq!(v_at(&mut plain, 4, FITS), 0.0);
+        assert!(v_at(&mut plain, 5, FITS) > 0.0);
+        for k in 4..30 {
+            assert_eq!(v_at(&mut hyst, k, FITS), 0.0, "step {k}");
+        }
+        // resume_margin farther: it goes, after resume_n steps
+        assert_eq!(v_at(&mut hyst, 30, FITS_WIDER), 0.0);
+        assert!(v_at(&mut hyst, 31, FITS_WIDER) > 0.0);
+        // moving again: back to the normal margin, the wall may come as close as before
+        assert!(v_at(&mut hyst, 32, FITS) > 0.0);
+    }
+
+    #[test]
+    fn resume_after_resume_n_steps_once_it_fits_wider() {
+        for n in [1, 3, 4] {
+            let mut nav = forward_resume(n, 0.1);
+            assert!(v_at(&mut nav, 0, 1.0) > 0.0);
+            assert_eq!(v_at(&mut nav, 1, BLOCKED), 0.0);
+            let mut k = 2;
+            let mut v = |d: f64| {
+                k += 1;
+                v_at(&mut nav, k, d)
+            };
+            for _ in 1..n {
+                assert_eq!(v(FITS_WIDER), 0.0, "n = {n}");
+            }
+            // a step that fits only with the normal margin restarts the count, as a blocked one
+            assert_eq!(v(FITS), 0.0, "n = {n}");
+            for _ in 1..n {
+                assert_eq!(v(FITS_WIDER), 0.0, "n = {n}");
+            }
+            assert!(v(FITS_WIDER) > 0.0, "n = {n}");
+        }
     }
 
     #[test]

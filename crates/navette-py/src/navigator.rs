@@ -97,9 +97,12 @@ impl PyNavOut {
 ///   frontier    FrontierParams (default: FrontierParams())
 ///   explore     ExploreParams (default: ExploreParams(rotate_in_place=True))
 ///   tilt_trust  a TiltTrust whose parameters the navigator's own takes (default: TiltTrust())
+///   resume_margin  m, restart hysteresis: after a stop, a step counts toward resuming only if the request
+///               also fits with the collision monitor's margin + resume_margin (stops stay at the normal
+///               margin); 0 = none
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
 /// centres, path and target in the fixed frame, for display; safety, behaviour, odometry, resume_n,
-/// forward_v as given.
+/// forward_v, resume_margin as given.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
 /// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
@@ -139,7 +142,7 @@ fn core_scan(py: Python<'_>, scan: &PyScan) -> PyResult<Scan> {
 impl PyNavigator {
     #[new]
     #[pyo3(signature = (safety=None, behaviour="explore", odometry=true, resume_n=2, forward_v=0.15, grid=None,
-                        frontier=None, explore=None, tilt_trust=None))]
+                        frontier=None, explore=None, tilt_trust=None, resume_margin=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -152,6 +155,7 @@ impl PyNavigator {
         frontier: Option<PyRef<'_, PyFrontierParams>>,
         explore: Option<PyRef<'_, PyExploreParams>>,
         tilt_trust: Option<PyRef<'_, PyTiltTrust>>,
+        resume_margin: f64,
     ) -> PyResult<Self> {
         let behaviour = match behaviour {
             "explore" => Behaviour::Explore,
@@ -178,6 +182,7 @@ impl PyNavigator {
             behaviour,
             odometry,
             resume_n,
+            resume_margin,
             forward_v,
             // the navigator's own grid only stands in for the Python object's between calls: one cell
             grid: OccupancyGridParams {
@@ -242,6 +247,11 @@ impl PyNavigator {
     #[getter]
     fn resume_n(&self) -> u32 {
         self.inner.params().resume_n
+    }
+
+    #[getter]
+    fn resume_margin(&self) -> f64 {
+        self.inner.params().resume_margin
     }
 
     #[getter]

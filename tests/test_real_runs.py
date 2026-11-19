@@ -101,7 +101,9 @@ def replayed(run, model=True):
     from navette.runtime import loop
     from navette.runtime import replay as rp
 
-    cfg = config.load(ROBOT)
+    # the prototype's resume gate (the core's defaults): the runs and the reference replays were made with it,
+    # before the config's restart hysteresis
+    cfg = config.load(ROBOT).replace("behaviour", resume_n=2, resume_margin=0.0)
     if model and not os.path.exists(cfg.adapter["model"]):
         pytest.skip(f"no floor model at {cfg.adapter['model']} (NAVETTE_ROBOT)")
     if model:
