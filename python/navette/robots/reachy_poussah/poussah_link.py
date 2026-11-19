@@ -51,6 +51,9 @@ CTRL_BIT = {"usb": F_CTRL_USB, "ble": F_CTRL_BLE}
 NH, NS, NZ = "nh", "ns", "nz"  # hello, halt (decel ramp to 0, keeps balancing), zero pl/pr
 STAND, SIT = "S0", "S1"        # legacy Commander lines
 NAV_RATES = (0, 10, 25, 50, 100)
+# balance gains A-D, balance angle O, margin M, tilt filter UF, wheel speed loop pv / pmVP / pmVF / pmVI, release
+# pf / pb (HOVERBOARD.md of the firmware)
+SETTING = re.compile(r"(A|B|C|D|O|M|UF|pv|pmVP|pmVF|pmVI|pf|pb)-?\d+(\.\d+)?")
 
 
 # ------------------------------------------------------------------ parsing
@@ -409,11 +412,12 @@ class BaseLink:
         with self._tx, self._lock:
             self._halted = False
 
-    def balance_angle(self, deg):
-        """O<deg>: the tilt the balance loop holds instead of 0 (-8..8 deg, RAM only, 0 at boot; while Stopped)."""
-        if not (math.isfinite(deg) and -8.0 <= deg <= 8.0):
-            raise ValueError(f"balance angle {deg} deg: must be within -8..8")
-        self._write(f"O{deg:g}")
+    def setting(self, line):
+        """One balance / wheel-loop setting line (Commander syntax, RAM only, accepted while Stopped), e.g. "A40",
+        "O2.4", "pv2.5". Only these settings can be sent this way: nothing that moves or stops the base."""
+        if not SETTING.fullmatch(line):
+            raise ValueError(f"not a balance setting line: {line!r}")
+        self._write(line)
 
     def stand(self):
         self._write(STAND)

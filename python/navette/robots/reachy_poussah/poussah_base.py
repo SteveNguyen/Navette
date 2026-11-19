@@ -51,6 +51,7 @@ STILL_LINES = 3         # consecutive post-stop [nav] lines with still wheels: t
 # not under the collision monitor: start with ~0.3 m clear ahead and behind.
 SETTLE_MIN_S, SETTLE_MAX_S = 2.0, 4.0
 SIT_SETTLE_S = 1.0  # after the base's own sit-down, time on its rest before a new stand-up is asked
+SETTING_GAP_S = 0.03  # between two setting lines before a stand-up
 WHEEL_R_DEFAULT = 0.0444  # m, the firmware's default wheel radius, if no [hello] gave r
 SYNC_S = 1.0            # BaseLink.sync() period
 
@@ -68,13 +69,15 @@ class PoussahBase:
 
     balancing = True
 
-    def __init__(self, link, dry_run=False, clock=time.monotonic, log=print, balance_angle_deg=None):
-        """balance_angle_deg: sent (O<deg>) before each stand-up, None = never sent (the base's boot value, 0).
-        With the Mini on, 2.4: at 0 the base stands ~7 cm ahead of its position goal to hold the Mini's forward
-        centre of mass, which made the 11-15 cm settle roll after S0 and offset [nav] lag; at 2.4 the roll is
-        3.5 cm (firmware floor test). The base forgets it at reboot, so it is sent every time."""
+    def __init__(self, link, dry_run=False, clock=time.monotonic, log=print, stand_settings=()):
+        """stand_settings: setting lines (poussah_link.SETTING) sent before each stand-up, while Stopped, after
+        the claim. The base keeps them in RAM only and boots with values that are NOT all right for the Mini
+        (its wheel speed loop), so they are sent every time; see the robot config."""
         self.link, self.dry_run, self.clock, self.log = link, dry_run, clock, log
-        self.balance_angle_deg = balance_angle_deg
+        self.stand_settings = tuple(stand_settings)
+        for line in self.stand_settings:  # bad config: an error at start-up, not at the first START
+            if not pl.SETTING.fullmatch(line):
+                raise ValueError(f"stand_settings: not a balance setting line: {line!r}")
         self._ready_bit_seen = False  # [nav] f READY_TO_STAND seen once: this firmware has it
         self._session = False    # between start() and stop()
         self._ready = False      # Balancing reached in this session
@@ -137,8 +140,10 @@ class PoussahBase:
         self.link.resume()
         self.link.send_velocity(0.0, 0.0)  # the claim
         if nav.st == pl.STOPPED:
-            if self.balance_angle_deg is not None:
-                self.link.balance_angle(self.balance_angle_deg)  # while Stopped, after the claim
+            for i, line in enumerate(self.stand_settings):  # while Stopped, after the claim
+                if i:
+                    time.sleep(SETTING_GAP_S)  # the firmware's own tool spaces them so; 12 lines ~0.35 s
+                self.link.setting(line)
             self._stood = True  # before the write: a stop must sit it even if the write fails half-way
             self.link.stand()
 

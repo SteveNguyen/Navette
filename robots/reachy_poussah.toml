@@ -110,6 +110,10 @@ base_link = "ble"        # "ble" or "usb"
 ble_name = "rmini_wheels"
 usb_port = "/dev/ttyACM0"
 nav_rate_hz = 50         # the base's telemetry rate
-# Balance angle sent before each stand-up (O<deg>, the base forgets it at reboot). With the Mini on: at 0 the
-# base stands ~7 cm ahead of its position goal (11-15 cm settle roll after S0); 2.4 -> 3.5 cm (firmware floor test).
-balance_angle_deg = 2.4
+# Base settings sent before each stand-up, while it sits (RAM only: lost at reboot). The Mini-on line of the
+# firmware's floor tool (fw e1b4045), with which every Mini-on floor result was measured (curve, settle, lag,
+# stops). At power-on the balance part already matches, but the wheel speed loop does not (pv 1, pmVF 0.001,
+# pmVI 100). O2.4 (balance angle): at O0 the base stands ~7 cm ahead of its position goal to hold the Mini's
+# forward centre of mass (11-15 cm settle roll after S0, offset [nav] lag); at 2.4 the roll is 3.5 cm.
+stand_settings = ["A40", "B-5", "C1.65", "D1", "O2.4", "M0", "UF0.1",
+                  "pv2.5", "pmVP0.5", "pmVF0.0015", "pmVI30", "pf0"]

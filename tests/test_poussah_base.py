@@ -184,22 +184,42 @@ def test_start_refused_while_the_base_sits_down_after_its_own_stop():
     assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
 
 
-def test_balance_angle_sent_before_each_stand_up_only():
-    """O2.4 after the claim, before S0 (it must reach the base while Stopped); not when already balancing; never
-    in a dry run (the logged transport drops it)."""
+MINI = ("A40", "B-5", "C1.65", "D1", "O2.4", "M0", "UF0.1", "pv2.5", "pmVP0.5", "pmVF0.0015", "pmVI30", "pf0")
+
+
+def test_stand_settings_sent_before_each_stand_up_only(monkeypatch):
+    """The Mini settings after the claim, before S0 (they must reach the base while Stopped); not when already
+    balancing; never in a dry run (the logged transport drops them)."""
+    monkeypatch.setattr(pb.time, "sleep", lambda s: None)
     r = Rig(st=0)
-    r.base.balance_angle_deg = 2.4
-    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "O2.4", "S0"]
+    r.base.stand_settings = MINI
+    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", *MINI, "S0"]
     b = Rig(st=2)
-    b.base.balance_angle_deg = 2.4
+    b.base.stand_settings = MINI
     assert b.ctrl.start()[0] and b.sent() == ["nv0,0,1"]
+
+
+def test_reachy_config_carries_the_mini_settings():
+    from pathlib import Path
+
+    from navette.config import load
+    cfg = load(str(Path(__file__).resolve().parents[1] / "robots" / "reachy_poussah.toml"))
+    assert tuple(cfg.adapter["stand_settings"]) == MINI
+    pb.PoussahBase(Rig(st=0).link, stand_settings=cfg.adapter["stand_settings"])  # all valid setting lines
+
+
+@pytest.mark.parametrize("bad", ["S0", "E1", "nv0.3,0,1", "A40 S0", "O", "pv2.5\nS0"])
+def test_only_setting_lines_can_be_sent_as_settings(bad):
     with pytest.raises(ValueError):
-        b.link.balance_angle(9.0)
+        pb.PoussahBase(Rig(st=0).link, stand_settings=[bad])
+    with pytest.raises(ValueError):
+        Rig(st=0).link.setting(bad)
 
 
-def test_balance_angle_dropped_in_a_dry_run(tmp_path):
+def test_stand_settings_dropped_in_a_dry_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb.time, "sleep", lambda s: None)
     d = Rig(st=0, dry_run=True, tmp_path=tmp_path)
-    d.base.balance_angle_deg = 2.4
+    d.base.stand_settings = MINI
     assert d.ctrl.start()[0] and all(s.startswith(bl.DRY_OK) for s in d.tr.sent)
 
 
