@@ -24,7 +24,8 @@ def client(base=None, **kw):
 
 def test_page_and_status():
     c, ctrl, status = client()
-    assert "START" in c.get("/").text
+    r = c.get("/")
+    assert "START" in r.text and r.headers["cache-control"] == "no-store"  # never an earlier run's page
     s = c.get("/api/status").json()
     assert s["state"] == "IDLE" and s["v_max"] == 0.15 and s["dry_run"] and s["base"] is None
     assert c.get("/api/preview.jpg").status_code == 503

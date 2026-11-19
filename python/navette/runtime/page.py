@@ -169,7 +169,10 @@ def add_routes(app, ctrl, status, timeout_s=2.0, preview_s=2.0, joystick=None):
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return page_html(timeout_s, preview_s, joystick is not None)
+        # no-store: the page differs between runs (joystick or not, poll period); a phone kept showing an earlier
+        # run's page without the joystick until reloaded
+        return HTMLResponse(page_html(timeout_s, preview_s, joystick is not None),
+                            headers={"Cache-Control": "no-store"})
 
     @app.get("/api/status")
     def get_status():
