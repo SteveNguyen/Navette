@@ -73,7 +73,7 @@ def run_robot(args, stop_event, web_app=None, log=print, **adapter_kw):
     cfg = load_config(args)
     behaviour = args.behaviour or cfg.behaviour.default
     forward_v = cfg.behaviour.forward_v if args.forward_v is None else args.forward_v
-    make_navigator = loop.default_navigator(cfg, behaviour, forward_v)  # fails here if the core has no Navigator
+    make_navigator = loop.default_navigator(cfg, behaviour, forward_v)  # before anything is opened
     out_dir = os.path.join(args.out, datetime.now().strftime("%Y%m%d-%H%M%S"))
     os.makedirs(out_dir)
     log(f"run folder {out_dir}")
@@ -117,7 +117,6 @@ def main_robot(args):
 
 
 def main_replay(args):
-    import navette
     from navette.runtime.replay import replay
 
     cfg = load_config(args)
@@ -125,11 +124,9 @@ def main_replay(args):
         cfg = cfg.replace("behaviour", default=args.behaviour)
     if args.forward_v is not None:
         cfg = cfg.replace("behaviour", forward_v=args.forward_v)
-    safety = navette.SafetyParams(**cfg.safety_params())
 
     def make_navigator(behaviour, forward_v, odometry):
-        return navette.Navigator(safety, behaviour=behaviour, odometry=odometry, resume_n=cfg.behaviour.resume_n,
-                                 forward_v=forward_v)
+        return loop.new_navigator(cfg, behaviour, forward_v, odometry)
 
     adapter = importlib.import_module(cfg.robot.adapter)
     runs = [args.replay] if os.path.exists(os.path.join(args.replay, "frames.csv")) else \

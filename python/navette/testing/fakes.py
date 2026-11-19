@@ -1,11 +1,13 @@
-"""A fake robot for tests without hardware: a point robot on a flat floor, with a wall across its way.
+"""A fake robot for tests without hardware: a point robot on a flat floor, with a wall across its way or in
+a room of wall segments (walls, boxes).
 
     world = FakeWorld()                       # clock: time.monotonic, or a ManualClock for instant tests
+    world = FakeWorld(walls=np.vstack([box(-1, -1, 2, 1), box(1.2, -0.2, 1.5, 0.2)]))  # a room with a box
     robot = FakeRobot(world)                  # .camera .imu .base (navette.interfaces)
 
-FakeWorld is the truth (pose of the base, wall); the fake devices read it:
+FakeWorld is the truth (pose of the base, walls); the fake devices read it:
   FakeBase    unicycle model, velocity applied at once; dead-man; start delay; scripted faults
-  FakeCamera  ideal pinhole pitched down, floor mask of the flat floor up to the wall
+  FakeCamera  ideal pinhole pitched down, floor mask of the flat floor up to the walls
   FakeImu     still head: specific force g along 'up', gyro = the base's yaw rate about 'up'
 
 Also the test doubles for what the runtime gets injected from the core: FakeNavigator and FakeUpFilter.
@@ -34,17 +36,29 @@ class ManualClock:
         self.t += dt
 
 
+def box(x0, y0, x1, y1):
+    """Wall segments (4, 4) [xa, ya, xb, yb] of an axis-aligned rectangle: a room's walls, or a box on the
+    floor."""
+    c = np.array([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], float)
+    return np.hstack([c, np.roll(c, -1, axis=0)])
+
+
 class FakeWorld:
     """Truth. Base pose (x, y, theta) in the world frame (x forward at the start, y left, theta
     counter-clockwise), moved by the velocity (v, w) the FakeBase applies; integrated when read.
-    wall_x: a wall along the world's y axis at this x (None: open floor)."""
+    wall_x: a wall along the world's y axis at this x (None: none).
+    walls: (N, 4) wall segments [xa, ya, xb, yb], taller than the camera (np.vstack of box(...)); None: none.
+    Nothing stops the base at a wall: min_clearance is the closest its centre ever came to one (a test
+    asserts it stayed above the robot's radius)."""
 
-    def __init__(self, clock=time.monotonic, wall_x=None):
+    def __init__(self, clock=time.monotonic, wall_x=None, walls=None, pose=(0.0, 0.0, 0.0)):
         self.clock, self.wall_x = clock, wall_x
-        self.x = self.y = self.theta = 0.0
+        self.walls = None if walls is None else np.asarray(walls, float)
+        self.x, self.y, self.theta = pose
         self.v = self.w = 0.0
         self.t = clock()
         self.t_zero = math.inf  # time at which the base's dead-man zeroes the velocity
+        self.min_clearance = self.clearance()
 
     def advance(self):
         """Integrate the pose up to now (exact arcs), the velocity dropping to 0 at t_zero. Returns now."""
@@ -59,9 +73,32 @@ class FakeWorld:
                 self.y += chord * math.sin(self.theta + dth / 2)
                 self.theta = math.remainder(self.theta + dth, 2 * math.pi)
                 self.t = t_end
+                self.min_clearance = min(self.min_clearance, self.clearance())
             if self.t >= self.t_zero:
                 self.v = self.w = 0.0
         return now
+
+    def clearance(self):
+        """Distance from the base's centre to the nearest wall segment (m); inf without walls."""
+        if self.walls is None:
+            return math.inf
+        p = np.array([self.x, self.y])
+        a, e = self.walls[:, :2], self.walls[:, 2:] - self.walls[:, :2]
+        u = np.clip(((p - a) * e).sum(1) / (e * e).sum(1), 0.0, 1.0)  # nearest point of each segment
+        return float(np.hypot(*(a + u[:, None] * e - p).T).min())
+
+    def wall_ranges(self, x, y, angles):
+        """Distance from (x, y) to the nearest wall segment along each world-frame direction (rad); inf if
+        none."""
+        d = np.stack([np.cos(angles), np.sin(angles)], 1)[:, None, :]  # (rays, 1, 2)
+        a = self.walls[None, :, :2] - np.array([x, y])                 # origin -> segment start
+        e = (self.walls[:, 2:] - self.walls[:, :2])[None]              # segment start -> end
+        # origin + t d = start + u e
+        den = d[..., 0] * e[..., 1] - d[..., 1] * e[..., 0]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (a[..., 0] * e[..., 1] - a[..., 1] * e[..., 0]) / den
+            u = (a[..., 0] * d[..., 1] - a[..., 1] * d[..., 0]) / den
+        return np.where((den != 0) & (t > 0) & (u >= 0) & (u <= 1), t, np.inf).min(1)
 
 
 class FakeBase:
@@ -179,6 +216,10 @@ class FakeCamera:
         floor = down
         if self.world.wall_x is not None:
             floor = down & (x + math.cos(th) * px - math.sin(th) * py < self.world.wall_x)
+        if self.world.walls is not None:
+            # a wall hides the floor behind it: floor only if the floor point comes before the nearest wall
+            # along the ray's direction on the ground
+            floor = floor & (np.hypot(px, py) < self.world.wall_ranges(x, y, th + np.arctan2(py, px)))
         return floor.reshape(self.mask_shape)
 
 
@@ -235,7 +276,7 @@ class FakeNavigator:
     """TEST DOUBLE of navette.Navigator (same step / observe signature). Drives straight at `v` and stops when
     the scan's free distance within +-10 deg is under stop_m. Records every call."""
 
-    grid = None
+    grid, frontier, path = None, (), None  # what the preview draws: no map, no plan
 
     def __init__(self, odometry=True, v=0.1, stop_m=0.6):
         self.odometry, self.v, self.stop_m = odometry, v, stop_m

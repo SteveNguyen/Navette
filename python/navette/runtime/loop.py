@@ -110,13 +110,19 @@ class Status:
                 "cam_h": self.cam_h, "pitch": self.pitch, "message": self.message}
 
 
-def default_navigator(cfg, behaviour, forward_v):
-    """odometry -> navette.Navigator with the config's collision monitor parameters."""
+def new_navigator(cfg, behaviour, forward_v, odometry):
+    """A navette.Navigator with the config's collision monitor parameters and resume gate. The grid, the
+    planner, the arc controller and the tilt trust keep the core's defaults: no robot config sets them."""
     import navette
 
-    safety = navette.SafetyParams(**cfg.safety_params())
-    return lambda odometry: navette.Navigator(safety, behaviour=behaviour, odometry=odometry,
-                                              resume_n=cfg.behaviour.resume_n, forward_v=forward_v)
+    return navette.Navigator(navette.SafetyParams(**cfg.safety_params()), behaviour=behaviour, odometry=odometry,
+                             resume_n=cfg.behaviour.resume_n, forward_v=forward_v)
+
+
+def default_navigator(cfg, behaviour, forward_v):
+    """run()'s make_navigator: odometry -> new_navigator."""
+    new_navigator(cfg, behaviour, forward_v, True)  # a bad parameter fails here, before the robot is opened
+    return lambda odometry: new_navigator(cfg, behaviour, forward_v, odometry)
 
 
 def default_up_filter(g):
@@ -292,7 +298,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
                 p0 = time.perf_counter()
                 snap = ctrl.snapshot()
                 status.preview = preview.jpeg(preview.view(
-                    frame.image, floor, frame.under, out, cam_h, pitch, getattr(nav, "grid", None), pose, scan,
+                    frame.image, floor, frame.under, out, cam_h, pitch, nav, pose, scan,
                     f"{snap['state']} sent v {snap['v']:.2f} w {snap['w']:+.2f} {status.hz:.1f} Hz"
                     + (" DRY" if dry_run else ""))) or status.preview
                 preview_ms = (time.perf_counter() - p0) * 1e3  # logged with the next step

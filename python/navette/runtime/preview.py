@@ -6,10 +6,13 @@ import cv2
 import numpy as np
 
 
-def draw_map(grid, pose, scan, half=2.5, size=360):
+def draw_map(nav, pose, scan, half=2.5, size=360):
     """Top-down view, +-half m around the robot: map frame x up in the image, y left. Free (light), obstacle
-    (dark red), unknown (grey), scan ends (red: obstacle, green: end of the seen floor), robot (purple).
-    grid: navette.OccupancyGrid (masks(), x0, y0, res; cell (i, j) covers x0 + i res, y0 + j res) or None."""
+    (dark red), unknown (grey), scan ends (red: obstacle, green: end of the seen floor), the planner's
+    frontier cells (magenta) and path (dark green), robot (purple).
+    nav: navette.Navigator: its grid (OccupancyGrid: masks(), x0, y0, res; cell (i, j) covers x0 + i res,
+    y0 + j res; or None), frontier ((N, 2) points, map frame) and path ((N, 2) or None)."""
+    grid = nav.grid
     img = np.full((size, size, 3), 150, np.uint8)
     k = size / (2 * half)
 
@@ -34,13 +37,18 @@ def draw_map(grid, pose, scan, half=2.5, size=360):
             continue
         q = (pose[0] + d * math.cos(pose[2] + b), pose[1] + d * math.sin(pose[2] + b))
         cv2.circle(img, P(*q), 2, (0, 0, 230) if np.isfinite(o) and o <= d + 1e-6 else (0, 170, 0), -1)
+    for q in nav.frontier:
+        cv2.circle(img, P(*q), 1, (200, 0, 200), -1)
+    if nav.path is not None:
+        for a, b in zip(nav.path[:-1], nav.path[1:]):
+            cv2.line(img, P(*a), P(*b), (0, 110, 0), 2)
     cv2.circle(img, P(pose[0], pose[1]), int(0.13 * k), (120, 0, 120), 2)
     cv2.line(img, P(pose[0], pose[1]), P(pose[0] + 0.3 * c, pose[1] + 0.3 * s), (120, 0, 120), 2)
     return img
 
 
-def view(bgr, drive, under, out, cam_h, pitch, grid, pose, scan, text=""):
-    """Camera 640x360 with green drivable floor and orange `under` (or None) | map 360x360."""
+def view(bgr, drive, under, out, cam_h, pitch, nav, pose, scan, text=""):
+    """Camera 640x360 with green drivable floor and orange `under` (or None) | map 360x360 (draw_map)."""
     cam = cv2.resize(bgr, (640, 360), interpolation=cv2.INTER_AREA)
     # tints with cv2 blends + masked copies: numpy fancy indexing with float maths took most of a ~65 ms
     # preview on the CM4
@@ -53,7 +61,7 @@ def view(bgr, drive, under, out, cam_h, pitch, grid, pose, scan, text=""):
                      f"h {cam_h:.3f} pitch {pitch:.1f}", (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     if text:
         cv2.putText(cam, text, (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    return np.concatenate([cam, draw_map(grid, pose, scan)], 1)
+    return np.concatenate([cam, draw_map(nav, pose, scan)], 1)
 
 
 def jpeg(img, quality=70):

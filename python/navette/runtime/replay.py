@@ -54,8 +54,9 @@ def run_args(run_dir):
     return args
 
 
-def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=print):
-    """make_navigator(behaviour, forward_v, odometry) -> navigator. Returns the steps.csv rows written."""
+def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=print, video=True):
+    """make_navigator(behaviour, forward_v, odometry) -> navigator. video=False: no live.mp4 (much faster).
+    Returns the steps.csv rows written."""
     camera, imu, base = robot.camera, robot.imu, robot.base
     args, follow = run_args(run_dir), robot_steps(run_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -70,7 +71,7 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
     up = LiveUp(make_up_filter, cfg.perception.up_g_s, cfg.perception.imu_max_age_s, g=getattr(imu, "g", None))
     loc = OdometryLocalization()
     nav, run, motion = new_nav(), 0, BaseMotion()
-    video, rows, t_first, t_prev, v_prev = _Video(out_dir), [], None, None, 0.0
+    video, rows, t_first, t_prev, v_prev = _Video(out_dir, video), [], None, None, 0.0
     while True:
         try:
             frame = camera.read()
@@ -110,7 +111,7 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         pitch = pitch_down_deg(up_c)
         rows.append(step_row(t - t_first, idx, pose, cam_h, pitch, out,
                              ((c1 - c0) * 1e3, (c2 - c1) * 1e3, (c3 - c2) * 1e3)))
-        video.write(frame, floor, out, cam_h, pitch, getattr(nav, "grid", None), pose, scan)
+        video.write(frame, floor, out, cam_h, pitch, nav, pose, scan)
     video.close()
     with open(os.path.join(out_dir, "steps.csv"), "w", newline="") as f:
         wr = csv.writer(f)
@@ -128,22 +129,23 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
 
 
 class _Video:
-    """live.mp4 of the replay, if OpenCV is installed and the frames carry a picture."""
+    """live.mp4 of the replay, if wanted, OpenCV is installed and the frames carry a picture."""
 
-    def __init__(self, out_dir):
-        self.path, self.vw = os.path.join(out_dir, "live.mp4"), None
-        try:
-            from navette.runtime import preview
-        except ImportError:
-            preview = None
-        self.preview = preview
+    def __init__(self, out_dir, wanted=True):
+        self.path, self.vw, self.preview = os.path.join(out_dir, "live.mp4"), None, None
+        if wanted:
+            try:
+                from navette.runtime import preview
+            except ImportError:
+                preview = None
+            self.preview = preview
 
-    def write(self, frame, floor, out, cam_h, pitch, grid, pose, scan):
+    def write(self, frame, floor, out, cam_h, pitch, nav, pose, scan):
         if self.preview is None or frame.image is None:
             return
         import cv2
 
-        img = self.preview.view(frame.image, floor, frame.under, out, cam_h, pitch, grid, pose, scan)
+        img = self.preview.view(frame.image, floor, frame.under, out, cam_h, pitch, nav, pose, scan)
         if self.vw is None:
             self.vw = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), 8.0, (img.shape[1], img.shape[0]))
         self.vw.write(img)
