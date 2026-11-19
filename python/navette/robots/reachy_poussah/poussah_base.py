@@ -77,6 +77,10 @@ class PoussahBase:
         self._seen = None        # last [nav] counted by park() (each line counted once)
         self._still = 0          # consecutive post-stop [nav] lines with still wheels
         self._balancing_since = None  # first Balancing [nav] of this session (settle after a stand-up)
+        # The base's own stop procedure (an [event] stop, e.g. its idle rule 3.5 s after the last nv) sits it down
+        # and releases control; until it sits, a claim is ignored although [nav] still says Balancing (floor
+        # test: our nv0,0 then went unanswered, no controller bit). START is refused until it has sat.
+        self._sitting_down = False
         self._next_sync = clock()
 
     # --- contract
@@ -95,16 +99,20 @@ class PoussahBase:
         return Odometry(nav.t_recv, pose[0], pose[1], pose[2], v, w)
 
     def start(self):
+        self._drain_events()  # events from before START are history (logged), except a stop procedure
         nav = self.link.latest()[0]
         if nav is None:
             raise StartRefused("no [nav] from the base")
+        if nav.st == pl.STOPPED:
+            self._sitting_down = False
         if nav.st not in (pl.STOPPED, pl.LIFTOFF, pl.BALANCING):
             raise StartRefused(f"base state {nav.st} (Stopping): try again")
+        if self._sitting_down:
+            raise StartRefused("the base is sitting down after its own stop: try again once it sits")
         if not self.dry_run:
             ok, why = self.link.hello_ok()
             if not ok:
                 raise StartRefused(why)
-        self._drain_events()  # events from before START are history (shown in the log)
         self._session, self._ready, self._fault, self._stood = True, False, None, False
         self._balancing_since = None
         self.link.resume()
@@ -165,7 +173,8 @@ class PoussahBase:
         if silent:
             return f"no [nav] for {NAV_STALE_S} s"
         if not self._ready:
-            self._ready = self.dry_run or self._settled(nav)
+            # and the base answered our claim (controller bit), else our nv would go nowhere
+            self._ready = self.dry_run or (self._settled(nav) and self.link.is_controller(nav) is not False)
             return None
         if not self.dry_run and nav.st != pl.BALANCING:
             return f"[nav] st {nav.st} while driving"
@@ -193,5 +202,7 @@ class PoussahBase:
         while not self.link.events.empty():
             e = self.link.events.get_nowait()
             self.log(f"[event] {e.ev} st={e.st} {e.details} (session {'open' if self._session else 'closed'})")
+            if e.ev == "stop":
+                self._sitting_down = True
             out.append(e)
         return out

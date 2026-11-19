@@ -168,6 +168,32 @@ def test_after_a_stand_up_driving_waits_for_the_settle_roll():
     assert n * 0.05 == pytest.approx(pb.SETTLE_MAX_S, abs=0.06) and m.ctrl.state == lr.DRIVING
 
 
+def test_start_refused_while_the_base_sits_down_after_its_own_stop():
+    """The base's idle rule ([event] stop) sits it down and releases control; [nav] still says Balancing for a
+    moment, and a claim then is ignored. START waits until the base has sat."""
+    r = Rig(st=2)
+    r.feed("[event] t=9 ev=stop st=2 reason=idle link=ble")
+    r.step(st=2)  # the idle tick drains the event
+    ok, msg = r.ctrl.start()
+    assert not ok and "sitting down" in msg and r.sent() == []
+    r.step(st=3)
+    r.step(st=0)  # sat
+    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
+
+
+def test_driving_only_once_the_base_names_us_controller():
+    """Claim not answered (no controller bit in [nav]): stay STARTING (zeros), never DRIVING."""
+    r = Rig(st=2, link_name="ble", f=7)
+    assert r.ctrl.start()[0]
+    for _ in range(5):
+        r.step(st=2, nav_out=out())
+    assert r.ctrl.state == lr.STARTING and all(s.startswith("nv0,0,") for s in r.sent())
+    r.f = 7 | bl.F_CTRL_BLE
+    r.step(st=2, nav_out=out())
+    r.step(st=2, nav_out=out())
+    assert r.ctrl.state == lr.DRIVING and r.sent()[-1].startswith("nv0.1,0,")
+
+
 def test_stand_timeout_halts():
     r = Rig(st=0)
     r.ctrl.start()

@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from navette.interfaces import DRIVING, FAULT, MAX_CAMERA_YAW_DEG, STARTING, STOPPED, camera_mount
+from navette.interfaces import DRIVING, FAULT, MAX_CAMERA_YAW_DEG, STARTING, STOPPED, StartRefused, camera_mount
 
 STATES = (STOPPED, STARTING, DRIVING, FAULT)
 PERIOD_S = 0.05  # command period used here (20 Hz, as the controller)
@@ -278,9 +278,16 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start
 
 
 def _start(base, timeout_s, clock, sleep):
-    """start(), zeros every period, until DRIVING; only STARTING on the way."""
-    base.start()
+    """start() (retried while it says StartRefused: a base may need a moment, e.g. to finish sitting down after
+    its own stop), then zeros every period until DRIVING; only STARTING on the way."""
     t_end = clock() + timeout_s
+    while True:
+        try:
+            base.start()
+            break
+        except StartRefused as e:
+            assert clock() < t_end, f"start() still refused {timeout_s} s on: {e}"
+            sleep(PERIOD_S)
     while (st := base.status()).state != DRIVING:
         assert st.state == STARTING, f"after start(): state {st.state} ({st.fault}), expected STARTING then DRIVING"
         assert clock() < t_end, f"not DRIVING {timeout_s} s after start()"
