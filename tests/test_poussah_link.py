@@ -131,7 +131,7 @@ def wheel_rates(v, w):
 def drive(odom, v, w, t, n=50):
     """Integrate the wheel angles for (v, w) during t s in n [nav] steps; returns the pose."""
     wl, wr = wheel_rates(v, w)
-    pl, pr = odom._last
+    pl, pr = odom._last[:2]
     for i in range(1, n + 1):
         odom.update(pl + wl * t * i / n, pr + wr * t * i / n)
     return odom.pose
@@ -159,6 +159,54 @@ def test_odom_arc():
     v, w = 0.2, 0.4
     x, y, th = drive(anchored(), v, w, (math.pi / 2) / w, n=7)  # few, large steps: exact per step
     assert (x, y, th) == pytest.approx((0.5, 0.5, math.pi / 2), abs=1e-9)
+
+
+def test_parse_nav_gz_by_key():
+    """gz sits between az and vc on recent firmware; older lines have none."""
+    line = nav_line().replace(" vc=", " gz=-0.1234 vc=")
+    assert bl.parse_line(line).gz == -0.1234
+    assert bl.parse_line(nav_line()).gz is None
+
+
+def test_odom_heading_from_gz_not_the_wheels():
+    """Conical wheels: a straight drive reads as a turn on the wheel difference (left wheel 4 % bigger here),
+    the gyro says straight. With gz the heading follows the gyro, the distance the wheels; across the base
+    clock's wrap."""
+    o = bl.Odometry(R, TRACK)
+    t0 = 2**32 - 500_000  # wraps after 0.5 s
+    o.update(0.0, 0.0, t0, 0.0)
+    v, n, T = 0.2, 100, 2.0
+    for i in range(1, n + 1):
+        s = v * T * i / n / R
+        o.update(-s * 1.04, -s, (t0 + int(T * i / n * 1e6)) % 2**32, 0.0)
+    x, y, th = o.pose
+    assert th == pytest.approx(0.0, abs=1e-12) and y == pytest.approx(0.0, abs=1e-12)
+    assert x == pytest.approx(v * T * 1.02)
+    # the same wheels without gz: the false heading this replaces
+    w = bl.Odometry(R, TRACK)
+    w.update(0.0, 0.0)
+    w.update(-v * T / R * 1.04, -v * T / R)
+    assert math.degrees(abs(w.pose[2])) > 5  # 4 % of 0.4 m over a 0.16 m track: 5.7 deg
+
+
+def test_odom_gz_turn_integrates_over_base_time():
+    o = bl.Odometry(R, TRACK)
+    o.update(0.0, 0.0, 1_000_000, 0.5)
+    for i in range(1, 21):  # 2 s at 0.5 rad/s, wheels still
+        o.update(0.0, 0.0, 1_000_000 + i * 100_000, 0.5)
+    assert o.pose == pytest.approx((0.0, 0.0, 1.0))
+
+
+def test_link_uses_gz_only_once_its_offset_is_known():
+    link, _ = make_link()
+    link.feed(1.0, HELLO)
+    gz_line = lambda t, f: nav_line(t=t, f=f).replace(" vc=", " gz=0.5 vc=")
+    link.feed(1.0, gz_line(1_000_000, 7))             # offset not learnt yet: wheels (still) -> no turn
+    link.feed(1.1, gz_line(2_000_000, 7))
+    assert link.latest()[1][2] == pytest.approx(0.0)
+    link.feed(1.2, gz_line(3_000_000, 7 | bl.F_GZ_OK))  # learnt: from here on, gz
+    link.feed(1.3, gz_line(4_000_000, 7 | bl.F_GZ_OK))
+    assert link.latest()[1][2] == pytest.approx(0.5)
 
 
 def test_odom_wraps_and_resets():

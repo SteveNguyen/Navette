@@ -44,6 +44,7 @@ STOPPED, LIFTOFF, BALANCING, STOPPING = 0, 1, 2, 3
 # [nav] f bits
 F_IMU_OK, F_TILT_TRUSTED, F_MOTORS_ON, F_DEADMAN, F_LOW_BATTERY = 1, 2, 4, 8, 16
 F_CTRL_USB, F_CTRL_BLE = 32, 64  # which link is the controller (nav-link-api.md section 4)
+F_GZ_OK = 128  # the base has learnt its gyro offset (about 1 s after a still boot): gz is usable for heading
 CTRL_BIT = {"usb": F_CTRL_USB, "ble": F_CTRL_BLE}
 
 NH, NS, NZ = "nh", "ns", "nz"  # hello, halt (decel ramp to 0, keeps balancing), zero pl/pr
@@ -64,7 +65,7 @@ class Nav:
     roll: float   # deg
     wl: float     # rad/s
     wr: float
-    pl: float     # rad, accumulated (counts only with the motors on)
+    pl: float     # rad, accumulated (also with the motors off, on recent firmware)
     pr: float
     ax: float     # m/s^2
     az: float
@@ -72,6 +73,8 @@ class Nav:
     wc: float     # rad/s
     cs: int       # seq of the last nv accepted since boot (0: none)
     f: int        # F_* bits
+    gz: float | None = None      # rad/s yaw rate, > 0 counter-clockwise, offset removed once f & F_GZ_OK;
+                                 # None on a firmware without it
     t_recv: float | None = None  # host monotonic when the line arrived (filled by BaseLink)
     t_host: float | None = None  # `t` mapped to host monotonic (None until the first nq round trip)
 
@@ -99,7 +102,7 @@ class Hello:
 
 _LINE = re.compile(r"^\[(\w+)\]\s*(.*)$")
 _KV = re.compile(r'(\w+)=("[^"]*"|\S+)')
-_NAV_FIELDS = [f for f in fields(Nav) if f.name not in ("t_recv", "t_host")]
+_NAV_FIELDS = [f for f in fields(Nav) if f.name not in ("gz", "t_recv", "t_host")]  # required keys
 
 
 def _value(s):
@@ -123,7 +126,8 @@ def parse_line(text):
     kind, raw = m.group(1), dict(_KV.findall(m.group(2)))
     try:
         if kind == "nav":
-            return Nav(**{f.name: f.type(raw[f.name]) for f in _NAV_FIELDS})
+            gz = float(raw["gz"]) if "gz" in raw else None
+            return Nav(**{f.name: f.type(raw[f.name]) for f in _NAV_FIELDS}, gz=gz)
         if kind == "event":
             details = {k: _value(v) for k, v in raw.items() if k not in ("t", "ev", "st")}
             return Event(int(raw["t"]), raw["ev"], int(raw["st"]), details)
@@ -235,29 +239,43 @@ class Odometry:
       ds     = -r (dpl + dpr) / 2        forward distance of the axle centre
       dtheta =  r (dpl - dpr) / track    counter-clockwise
     Both signs were confirmed on the floor (nv v > 0 drives forward, w > 0 turns counter-clockwise). The
-    wheel radius and track come from [hello]; they are the firmware's defaults, not calibrated."""
+    wheel radius and track come from [hello].
+
+    Heading from the base's gyro, not the wheels, whenever the base gives it (gz, with f & F_GZ_OK): the
+    wheels are conical, their rolling radii differ by ~4 % with a fraction of a degree of roll, which made
+    ~30 deg of false heading per 2 m driven straight (firmware measurement); on the robot the wheel heading
+    drifted 262 deg in a 224 s exploration. gz is integrated over the base clock t (micros, wraps at 2^32),
+    trapezoidal between two lines. The wheel difference is only the fallback (older firmware, or before the
+    base has learnt its gyro offset ~1 s after a still boot); distance always comes from the wheels."""
 
     def __init__(self, r, track):
         self.r, self.track = r, track
         self.pose = (0.0, 0.0, 0.0)
-        self._last = None  # (pl, pr) of the previous update; None: next update only anchors
+        self._last = None  # (pl, pr, t, gz or None) of the previous update; None: next update only anchors
 
     def reset(self):
         """Pose back to 0; the next update re-anchors (after a reconnection, a base reboot or an nz)."""
         self.pose, self._last = (0.0, 0.0, 0.0), None
 
-    def update(self, pl, pr):
+    def update(self, pl, pr, t=None, gz=None):
+        """pl, pr wheel angles (rad); t base micros and gz yaw rate (rad/s), gz None unless the base's offset is
+        known (f & F_GZ_OK)."""
         if self._last is not None:
-            dl, dr = pl - self._last[0], pr - self._last[1]
+            pl0, pr0, t0, gz0 = self._last
+            dl, dr = pl - pl0, pr - pr0
             ds = -self.r * (dl + dr) / 2
-            dth = self.r * (dl - dr) / self.track
+            if gz is not None and gz0 is not None and t is not None and t0 is not None:
+                dt = ((t - t0) % 2**32) * 1e-6
+                dth = (gz + gz0) / 2 * dt
+            else:
+                dth = self.r * (dl - dr) / self.track
             x, y, th = self.pose
             # exact for a constant-curvature step: chord ds * sinc(dth/2) along the mid heading
             chord = ds * np.sinc(dth / (2 * np.pi))
             mid = th + dth / 2
             th = math.remainder(th + dth, 2 * math.pi)
             self.pose = (x + chord * math.cos(mid), y + chord * math.sin(mid), th)
-        self._last = (pl, pr)
+        self._last = (pl, pr, t, gz)
         return self.pose
 
 
@@ -416,7 +434,7 @@ class BaseLink:
             if isinstance(msg, Nav):
                 msg = replace(msg, t_recv=t_recv, t_host=self._clock.to_host(msg.t))
                 if self._odom:
-                    self._odom.update(msg.pl, msg.pr)
+                    self._odom.update(msg.pl, msg.pr, msg.t, msg.gz if msg.f & F_GZ_OK else None)
                 if msg.cs in self._sent:  # exact match: the base applies nv in order, older ones are done
                     self.cs_latencies.append(t_recv - self._sent[msg.cs])
                     self._sent = {s: t for s, t in self._sent.items() if s > msg.cs}

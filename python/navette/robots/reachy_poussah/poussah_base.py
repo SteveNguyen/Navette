@@ -24,7 +24,8 @@ What the contract's calls mean on this base (firmware docs/nav-link-api.md, sect
              procedure started by the other link, a low-battery sit-down all halt the controller.
              STARTING until the first Balancing [nav], then DRIVING.
              Also the periodic tick: one clock-sync round trip (nq) per SYNC_S.
-  odometry() pose from the wheel angles (poussah_link.Odometry), v and w measured from the wheel speeds.
+  odometry() pose from the wheel angles and the base's gyro (poussah_link.Odometry); v from the wheel speeds,
+             w from the gyro (gz) once its offset is known, else from the wheel speeds.
 
 Dry run: the link's transport drops every command (poussah_link.LoggedTransport), so the base never stands
 and never names us controller: start() skips the [hello] check and status() says DRIVING at once, without the
@@ -78,7 +79,11 @@ class PoussahBase:
             return None
         # wheel speeds in the firmware's wheel sign (poussah_link.Odometry): forward = both negative
         v = -hello.r * (nav.wl + nav.wr) / 2
-        w = hello.r * (nav.wl - nav.wr) / hello.track
+        # yaw rate from the base's gyro when its offset is known, as the pose's heading (poussah_link.Odometry)
+        if nav.gz is not None and nav.f & pl.F_GZ_OK:
+            w = nav.gz
+        else:
+            w = hello.r * (nav.wl - nav.wr) / hello.track
         return Odometry(nav.t_recv, pose[0], pose[1], pose[2], v, w)
 
     def start(self):
