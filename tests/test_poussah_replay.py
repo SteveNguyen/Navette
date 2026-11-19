@@ -150,6 +150,21 @@ def test_replay_follows_the_robot_steps(tmp_path):
     assert [s[1] for s in navs[0][0].steps] == pytest.approx([0.1, 0.1, 0.1, 0.2])  # dt spans the skipped frame
 
 
+def test_replay_of_an_old_run_writes_the_camera_attitude(tmp_path):
+    """A run recorded before the attitude columns (its steps.csv has none of ATT_COLS, nor most LIVE_COLS)
+    replays; the replay's steps.csv has them last: the camera looking straight ahead, level: no roll, 'up' =
+    -y (image up)."""
+    from navette.runtime.loop import ATT_COLS, STEP_COLS
+
+    rows = replay(tmp_path, steps={k: (0, 0.0) for k in range(10)})
+    assert len(rows) == 10 and list(rows[0]) == STEP_COLS + ATT_COLS
+    with open(tmp_path / "run" / "steps.csv") as f:
+        assert not set(ATT_COLS) & set(next(csv.reader(f)))  # the recorded run had none
+    for r in rows:
+        assert float(r["roll_deg"]) == pytest.approx(0.0, abs=0.5)
+        assert [float(r[k]) for k in ("up_x", "up_y", "up_z")] == pytest.approx([0, -1, 0], abs=0.01)
+
+
 def test_replay_puts_glance_frames_into_the_map_only(tmp_path):
     navs = []
     steps = {k: (0, 0.0, "GLANCE" if k in (2, 3) else "DRIVE") for k in range(10)}

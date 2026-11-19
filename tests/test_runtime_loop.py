@@ -147,6 +147,23 @@ def test_camera_pose_height_along_up_and_heading():
     assert h == pytest.approx(0.3 + 0.05 * math.cos(lean) - 0.04 * math.sin(lean))
 
 
+@pytest.mark.parametrize("pitch", [-10.0, 0.0, 20.0, 60.0])
+@pytest.mark.parametrize("roll", [-30.0, -2.0, 0.0, 5.0, 170.0])
+def test_roll_from_up_in_the_camera_frame(pitch, roll):
+    """A camera pitched down then turned about its optical axis by roll (> 0: clockwise seen from behind, its
+    right side down): roll_deg gives the roll back whatever the pitch, pitch_down_deg the pitch."""
+    c, s = math.cos(math.radians(roll)), math.sin(math.radians(roll))
+    rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])  # about the optical axis: x (right) toward y (down)
+    R = camera_rotation(pitch) @ rz  # camera axes in the base frame (x forward, y left, z up)
+    assert (R @ [1, 0, 0])[2] == pytest.approx(-s * math.cos(math.radians(pitch)))  # roll > 0: right side down
+    up_c = R.T @ np.array([0, 0, 1.0])
+    assert loop.roll_deg(up_c) == pytest.approx(roll)
+    assert loop.pitch_down_deg(up_c) == pytest.approx(pitch)
+    row = loop.attitude_row(up_c)
+    assert len(row) == len(loop.ATT_COLS) and float(row[0]) == pytest.approx(roll, abs=0.01)
+    assert [float(x) for x in row[1:]] == pytest.approx(up_c, abs=1e-6)
+
+
 def test_camera_mount_warning():
     """The loop's one-time check of the Camera contract's mounting limits: yaw off the base's forward axis,
     horizontal offset against the footprint radius."""
@@ -325,7 +342,13 @@ def test_loop_drives_to_the_wall_and_stops(tmp_path):
     steps, cmds, meta = r.end()
     assert r.navs[0].odometry is True and all(n.observed == [] for n in r.navs)
     # logs: the steps.csv columns, one row per step, both navigators
-    assert list(steps[0]) == loop.STEP_COLS + loop.LIVE_COLS
+    assert list(steps[0]) == loop.STEP_COLS + loop.LIVE_COLS + loop.ATT_COLS  # new columns last
+    # the camera's attitude: 20 deg down, no roll; 'up' in the camera frame (x right, y down, z optical axis)
+    up = np.radians(20.0)
+    for s in steps:
+        assert float(s["roll_deg"]) == pytest.approx(0.0, abs=0.05)
+        assert [float(s[k]) for k in ("up_x", "up_y", "up_z")] == pytest.approx([0, -np.cos(up), -np.sin(up)],
+                                                                                abs=1e-3)
     assert len(steps) == len(r.navs[0].steps) + len(r.navs[1].steps) == meta["steps"]
     assert {s["run"] for s in steps} == {"0", "1"} and {s["imu"] for s in steps} == {"fake"}
     drive = [s for s in steps if s["ctrl"] == "DRIVING" and float(s["v"]) > 0]

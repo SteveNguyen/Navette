@@ -12,7 +12,8 @@ Run folder (written here; the adapter adds its own recordings next to them, see 
   meta.json      clock, config, "args" (behaviour, forward_v, dry_run, base: whether there is one), "session"
                  (the recording session's name, or null), "robot" (the adapter's data, refreshed at the end),
                  frames (count)
-  steps.csv      one row per navigation step, STEP_COLS + LIVE_COLS (a replay follows frame, run, v_prev, state)
+  steps.csv      one row per navigation step, STEP_COLS + LIVE_COLS + ATT_COLS (a replay follows frame, run,
+                 v_prev, state, and in a teleop run v_req, w_req)
   commands.csv   every call the controller made to the base (or would have: no base / dry run)
 """
 import csv
@@ -42,6 +43,10 @@ STEP_COLS = ["t", "frame", "x", "y", "heading_deg", "cam_h", "pitch_down_deg", "
 # own stages inside Camera.read (Frame.ms: head pose read, frame save), the IMU read + filter, and the
 # previous iteration's preview render
 LIVE_COLS = ["ctrl", "run", "v_prev", "imu", "lat_ms", "wait_ms", "head_ms", "imu_ms", "save_ms", "preview_ms"]
+# the camera's full attitude for the dataset import (with cam_h and pitch_down_deg): the roll (roll_deg) and the
+# 'up' the scan used, in the camera frame. Last, in the robot run and in the replay, so that the columns before
+# keep their places (runs recorded before have none: read steps.csv by column name)
+ATT_COLS = ["roll_deg", "up_x", "up_y", "up_z"]
 STOP_WAIT_S = 4.0  # at exit: time given to the command thread to finish the stop (park)
 
 
@@ -98,6 +103,19 @@ def camera_mount_warning(T_base_cam, radius):
 def pitch_down_deg(up_c):
     """Optical axis angle below the horizon (deg) from 'up' in the camera frame (z optical axis)."""
     return math.degrees(math.asin(float(np.clip(-up_c[2], -1, 1))))
+
+
+def roll_deg(up_c):
+    """Camera roll about its optical axis (deg) from 'up' in the camera frame (x right, y down, z optical axis):
+    0 when the image's vertical axis is in the vertical plane; > 0 when the camera is turned clockwise as seen
+    from behind it (its right side down). With pitch p down and roll r, up_c = (-sin r cos p, -cos r cos p,
+    -sin p), so r = atan2(-up_x, -up_y), whatever the pitch (undefined only looking straight up or down)."""
+    return math.degrees(math.atan2(-float(up_c[0]), -float(up_c[1])))
+
+
+def attitude_row(up_c):
+    """The ATT_COLS of a steps.csv row: roll (deg) and 'up' in the camera frame."""
+    return [f"{roll_deg(up_c):.2f}"] + [f"{float(u):.6f}" for u in up_c]
 
 
 class BaseMotion:
@@ -287,7 +305,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
         steps_f = open(os.path.join(out_dir, "steps.csv"), "w", newline="", buffering=1)
         files.append(steps_f)
         steps_w = csv.writer(steps_f)
-        steps_w.writerow(STEP_COLS + LIVE_COLS)
+        steps_w.writerow(STEP_COLS + LIVE_COLS + ATT_COLS)
         up = LiveUp(make_up_filter, cfg.perception.up_g_s, cfg.perception.imu_max_age_s)
         loc = OdometryLocalization()
         # odometry moves the pose only with a base that drives: not without a base, nor in a dry run (the robot
@@ -368,7 +386,8 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
                     nav.observe(t, pose, scan, cam_h)
                     steps_w.writerow(step_row(t - t0, frame.index, pose, cam_h, pitch_down_deg(up_c), hold,
                                               ((c1 - c0) * 1e3, (c2 - c1) * 1e3, (time.perf_counter() - c2) * 1e3))
-                                     + [ctrl.state, nav_run, "0.0000", imu.name, ""] + ms_tail + [""])
+                                     + [ctrl.state, nav_run, "0.0000", imu.name, ""] + ms_tail + [""]
+                                     + attitude_row(up_c))
                 ctrl.set_nav(hold, t, nav_run)
                 status.nav_state = "GLANCE"
                 continue
@@ -397,7 +416,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
             steps_w.writerow(step_row(t - t0, frame.index, pose, cam_h, pitch, out,
                                       ((c1 - c0) * 1e3, (c2 - c1) * 1e3, (c3 - c2) * 1e3))
                              + [ctrl.state, nav_run, f"{v_prev:.4f}", imu.name, f"{lat_ms:.1f}"] + ms_tail
-                             + [f"{preview_ms:.1f}"])
+                             + [f"{preview_ms:.1f}"] + attitude_row(up_c))
             n_steps += 1
             if t_prev is not None and t > t_prev:
                 status.hz = 0.9 * status.hz + 0.1 / (t - t_prev)

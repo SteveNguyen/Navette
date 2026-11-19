@@ -133,7 +133,9 @@ PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
 ## 6. After a run
 
 Each run is a folder `~/navette/runs/<date-time>/` (frames, IMU, base link log, `steps.csv`, `commands.csv`,
-`meta.json`). Recorded frames show the inside of a home: keep them private. Copy it to the laptop and free the
+`meta.json`). `steps.csv` has one row per navigation step: pose, the camera's height, pitch (`pitch_down_deg`),
+roll (`roll_deg`) and 'up' in the camera frame (`up_x`, `up_y`, `up_z`; these four columns come last, and runs
+recorded before them have none), the commands. Recorded frames show the inside of a home: keep them private. Copy it to the laptop and free the
 robot's disk:
 
 ```bash

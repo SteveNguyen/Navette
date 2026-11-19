@@ -13,8 +13,9 @@ its request (v_req, w_req: the operator's, as the robot's navigator took it). Wi
 stepped and v_prev is the previous step's output (a teleop run then gets no request: (0, 0)). Behaviour, forward speed and dry run come from the
 run's meta.json ("args"), else from the arguments.
 
-Output folder: steps.csv (STEP_COLS; timings are this machine's) and, with OpenCV and frames that carry a
-picture, live.mp4 (camera with the drivable floor | map).
+Output folder: steps.csv (STEP_COLS + ATT_COLS; timings are this machine's) and, with OpenCV and frames that
+carry a picture, live.mp4 (camera with the drivable floor | map). The robot's steps.csv is read by column name:
+runs recorded before a column existed (ATT_COLS, older LIVE_COLS) replay as well.
 """
 import csv
 import json
@@ -25,8 +26,8 @@ import numpy as np
 
 from navette.interfaces import Odometry
 from navette.runtime.localization import OdometryLocalization
-from navette.runtime.loop import (STEP_COLS, BaseMotion, camera_pose, finite_odometry, free_space, pitch_down_deg,
-                                  step_row, usable_camera_pose)
+from navette.runtime.loop import (ATT_COLS, STEP_COLS, BaseMotion, attitude_row, camera_pose, finite_odometry,
+                                  free_space, pitch_down_deg, step_row, usable_camera_pose)
 from navette.runtime.up import LiveUp
 
 
@@ -117,12 +118,12 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         t_prev, v_prev = t, out.v  # (a robot run overrides v_prev from its steps.csv)
         pitch = pitch_down_deg(up_c)
         rows.append(step_row(t - t_first, idx, pose, cam_h, pitch, out,
-                             ((c1 - c0) * 1e3, (c2 - c1) * 1e3, (c3 - c2) * 1e3)))
+                             ((c1 - c0) * 1e3, (c2 - c1) * 1e3, (c3 - c2) * 1e3)) + attitude_row(up_c))
         video.write(frame, floor, out, cam_h, pitch, nav, pose, scan)
     video.close()
     with open(os.path.join(out_dir, "steps.csv"), "w", newline="") as f:
         wr = csv.writer(f)
-        wr.writerow(STEP_COLS)
+        wr.writerow(STEP_COLS + ATT_COLS)
         wr.writerows(rows)
     c = {k: STEP_COLS.index(k) for k in ("cam_h", "seg_ms", "scan_ms", "nav_ms")}
     ms = np.array([[float(r[c[k]]) for k in ("seg_ms", "scan_ms", "nav_ms")] for r in rows]) if rows else np.zeros((1, 3))
