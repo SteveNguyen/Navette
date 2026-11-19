@@ -4,16 +4,23 @@ Two machines: a **laptop** (Linux, x86-64) builds and tests, and the **robot** (
 Pi CM4, 64-bit Raspberry Pi OS) runs. The robot has too little disk space for a Rust toolchain, so the wheel is
 cross-built on the laptop and copied over. Nothing here touches the robot's own Python environments.
 
-Reference setup: Reachy Mini on the Poussah base, base firmware `hoverboard-nav` 8c704f1 or later (it loads
-its Mini settings from its seat switch). Commands assume the robot answers as `reachy-mini.local` and its user
-is `pollen`.
+Reference setup: Reachy Mini (Wireless) on the Poussah base. Commands assume the robot answers as
+`reachy-mini.local` and its user is `pollen`.
+
+**Base firmware**: `hoverboard-nav` branch of `pollen-robotics/firmware_poussah`, commit 8c704f1 or later (it loads
+its Mini settings from its seat switch, gives the gyro heading and the ready-to-stand flag). Build and flash over
+USB from that repository (see its `HOVERBOARD.md`): `pio run -e hoverboard`, then `tools/flash.sh` (keeps the
+base's own calibration). The base must also be calibrated (`[hello] setup=7`): see `HOVERBOARD.md`, "Per-base
+setup". Older firmware works only with the settings line in the config (`[adapter] stand_settings`, the comment
+there gives it) and without the gyro heading (heading then drifts ~30 deg per 2 m).
 
 ## 1. Laptop
 
-Prerequisites: [uv](https://docs.astral.sh/uv/), [rustup](https://rustup.rs/) (stable toolchain), git.
+Prerequisites: [uv](https://docs.astral.sh/uv/), [rustup](https://rustup.rs/) (stable toolchain), git, and the
+Hugging Face CLI for the floor model (`uv tool install huggingface_hub`, gives `hf`).
 
 ```bash
-git clone <navette repository> navette
+git clone https://github.com/SteveNguyen/Navette.git navette
 uv sync --project navette                       # builds the extension, installs the dev tools
 uv run --project navette pytest -q navette/tests    # ~1.5 min, no hardware
 cargo test --manifest-path navette/Cargo.toml
@@ -107,7 +114,16 @@ PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
 
 - The head moves to its navigation pose at once. **The base does not move until START.**
 - Open the status page on a phone or laptop on the same network: `http://reachy-mini.local:8090/` (Android does
-  not resolve `.local` names: use the robot's IP address). START, STOP; pushing an antenna is also a STOP.
+  not resolve `.local` names: use the robot's IP address; reload the page if it was open from an earlier run).
+  START, STOP; pushing an antenna is also a STOP.
+- **What exploration looks like**: after START the base stands up (it lurches back, then sways forward, ~±14 cm)
+  and settles ~2 s; then it explores at up to 0.15 m/s. It often turns on the spot: the camera sees only ~70 deg
+  ahead and nothing closer than ~0.47 m, so it turns to look before it drives. It stops close to obstacles and
+  turns away; it never reverses. When nothing is left to explore it turns once all round, then stops by itself
+  ("exploration finished") and sits down. The phone page shows the camera with the floor in green and the map.
+- **Known limits** (floor model): doorsteps, thresholds and some doormats read as obstacles (the robot may not
+  leave a room); small false obstacles appear on shiny or sunlit tiles; floor under low furniture is not always
+  recognised. The robot then stops or turns away: it is a limit, not a fault. Tell us, with the run folder.
 - The robot halts by itself if the page stops polling for 2 s, if perception goes stale, or on a base fault.
 - `--behaviour forward`: straight ahead through the collision monitor. `--dry-run`: everything runs, nothing is
   sent to the base. `--no-base`: no base at all (head and camera only).
@@ -159,3 +175,5 @@ uv run --project navette --extra reachy-poussah python -m navette.runtime \
 | START refused: `setup=...` | the base is not calibrated (firmware setup must be 7) |
 | `no [nav] from the base` | base off, out of Bluetooth range, or `ble_name` wrong |
 | page unreachable from a phone | `.local` name on Android: use the IP; the robot's WiFi can also drop (the run then halts by itself) |
+| robot halted, page and ssh unreachable, head still holding | the robot's WiFi dropped (seen twice on the reference unit, during runs with the Bluetooth base link); the program keeps running and logging; it does not come back by itself: restart the Mini (head on the body), then copy the run |
+| no joystick on the page in a teleop run | the browser shows an earlier run's page: reload it |
