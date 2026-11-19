@@ -259,7 +259,9 @@ impl PyFreeSpace {
         h: f64,
     ) -> PyResult<PyScan> {
         let mask = self.mask(&floor)?;
-        let s = self.inner.scan(&mask, &up_c, h).map_err(shape_err)?;
+        let inner = &mut self.inner;
+        // without the GIL (see lib.rs)
+        let s = py.detach(|| inner.scan(&mask, &up_c, h)).map_err(shape_err)?;
         Ok(PyScan::from_core(py, &s))
     }
 }

@@ -90,6 +90,17 @@ class Live:
             return list(csv.DictReader(f))
 
 
+def read(f):
+    """f() on a navigator (or its grid) that the loop's thread is stepping. A step runs without the GIL with
+    its objects borrowed, and using them meanwhile raises RuntimeError: retried."""
+    for _ in range(2000):
+        try:
+            return f()
+        except RuntimeError:
+            time.sleep(0.001)
+    raise AssertionError("the navigator stayed borrowed for 2 s")
+
+
 def test_start_explores_without_collision_and_stop_stops(tmp_path):
     world = FakeWorld(walls=ROOM)
     r = Live(tmp_path, world, fake_config())
@@ -99,8 +110,9 @@ def test_start_explores_without_collision_and_stop_stops(tmp_path):
     time.sleep(4.0)  # exploring
     assert r.ctrl.state == ctl.DRIVING, r.ctrl.reason
     nav = r.navs[-1]
-    assert nav.behaviour == "explore" and nav.odometry and nav.safety.latency == pytest.approx(0.9 + 0.63)
-    assert int(nav.grid.masks()[1].sum()) > 400  # > 1 m^2 of floor mapped (0.05 m cells)
+    assert read(lambda: (nav.behaviour, nav.odometry)) == ("explore", True)
+    assert read(lambda: nav.safety).latency == pytest.approx(0.9 + 0.63)
+    assert int(read(lambda: nav.grid.masks()[1]).sum()) > 400  # > 1 m^2 of floor mapped (0.05 m cells)
     r.robot.stop("button")  # the robot's own stop control
     r.wait(lambda: r.ctrl.state == ctl.IDLE, "IDLE after STOP")
     world.advance()
@@ -162,7 +174,7 @@ def test_forward_stops_before_the_box(tmp_path):
 
     r.wait(at_rest, "the stop", 20.0)
     gap = BOX_AHEAD_X - world.x  # base centre to the box's near face
-    sp = r.navs[-1].safety
+    sp = read(lambda: r.navs[-1].safety)
     # The box ends up filling the image bottom: no floor is seen in front of it any more, and the collision
     # monitor lets nothing closer. That is where the camera's view of the floor starts: 0.35 m for this
     # camera (0.35 m high, lower edge of the view 45 deg down), within a frame's travel.
@@ -207,7 +219,7 @@ def test_a_bad_first_imu_sample_does_not_blind_the_robot(tmp_path, bad):
     r.start()
     r.wait(lambda: world.x > 0.2, "the drive", 15.0)
     r.wait(lambda: at_rest(r), "the stop", 20.0)
-    sp = r.navs[-1].safety
+    sp = read(lambda: r.navs[-1].safety)
     assert sp.radius + sp.margin < 1.0 - world.x < 0.5, world.x  # stopped before the wall
     assert r.ctrl.state == ctl.DRIVING and not first[0]  # held by the collision monitor
     steps = r.end()

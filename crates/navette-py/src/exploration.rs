@@ -310,14 +310,16 @@ impl PyFrontierPlanner {
     #[pyo3(signature = (t, pose, grid, near=None, near_half=0.0))]
     fn plan(
         &mut self,
+        py: Python<'_>,
         t: f64,
         pose: [f64; 3],
         grid: PyRef<'_, PyOccupancyGrid>,
         near: Option<Vec<f64>>,
         near_half: f64,
     ) {
-        self.inner
-            .plan(t, pose2(pose), &grid.inner, &near.unwrap_or_default(), near_half);
+        let (inner, grid, near) = (&mut self.inner, &grid.inner, near.unwrap_or_default());
+        // without the GIL (see lib.rs)
+        py.detach(|| inner.plan(t, pose2(pose), grid, &near, near_half));
     }
 
     /// Fixed-frame heading (rad) to the path point `lookahead` ahead; None without a path.
@@ -343,11 +345,13 @@ pub struct PyFrontierExplore {
 }
 
 impl PyFrontierExplore {
-    /// Run `f` on the behaviour, its planner in place.
-    fn with<R>(&mut self, py: Python<'_>, f: impl FnOnce(&mut FrontierExplore) -> R) -> R {
+    /// Run `f` on the behaviour, its planner in place, without the GIL (see lib.rs). The planner object
+    /// stays mutably borrowed meanwhile.
+    fn with<R: Send>(&mut self, py: Python<'_>, f: impl FnOnce(&mut FrontierExplore) -> R + Send) -> R {
         let mut planner = self.planner.borrow_mut(py);
         std::mem::swap(&mut self.inner.goals.planner, &mut planner.inner);
-        let r = f(&mut self.inner);
+        let inner = &mut self.inner;
+        let r = py.detach(|| f(inner));
         std::mem::swap(&mut self.inner.goals.planner, &mut planner.inner);
         r
     }
@@ -430,7 +434,8 @@ impl PyFrontierExplore {
     /// Plan from pose, with the image-bottom obstacles of the last scan.
     #[pyo3(name = "_plan")]
     fn plan(&mut self, py: Python<'_>, t: f64, pose: [f64; 3], grid: PyRef<'_, PyOccupancyGrid>) {
-        self.with(py, |fe| fe.goals.plan(t, pose2(pose), &grid.inner));
+        let grid = &grid.inner;
+        self.with(py, |fe| fe.goals.plan(t, pose2(pose), grid));
     }
 
     /// The goal heading (fixed frame, rad): the recovery turn in progress, else along the planner's path
@@ -442,7 +447,8 @@ impl PyFrontierExplore {
         pose: [f64; 3],
         grid: PyRef<'_, PyOccupancyGrid>,
     ) -> f64 {
-        self.with(py, |fe| fe.goals.choose_goal(t, pose2(pose), &grid.inner))
+        let grid = &grid.inner;
+        self.with(py, |fe| fe.goals.choose_goal(t, pose2(pose), grid))
     }
 
     /// The way is blocked: start the recovery turn; the second block on the same target bans it.
@@ -462,9 +468,8 @@ impl PyFrontierExplore {
         v_applied: f64,
     ) -> PyResult<(f64, f64)> {
         let scan = scan.map(|s| s.to_core(py)).transpose()?;
-        Ok(self.with(py, |fe| {
-            fe.step(t, pose2(pose), scan.as_ref(), &grid.inner, v_applied)
-        }))
+        let grid = &grid.inner;
+        Ok(self.with(py, |fe| fe.step(t, pose2(pose), scan.as_ref(), grid, v_applied)))
     }
 }
 

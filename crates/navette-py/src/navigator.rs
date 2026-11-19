@@ -102,6 +102,9 @@ impl PyNavOut {
 /// forward_v as given.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
+/// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
+/// while; other threads run meanwhile). One thread per navigator: using it or its grid from another thread
+/// during such a call raises RuntimeError.
 #[pyclass(name = "Navigator", module = "navette")]
 pub struct PyNavigator {
     inner: Navigator,
@@ -111,11 +114,13 @@ pub struct PyNavigator {
 }
 
 impl PyNavigator {
-    /// Run `f` on the navigator, its grid in place.
-    fn with<R>(&mut self, py: Python<'_>, f: impl FnOnce(&mut Navigator) -> R) -> R {
+    /// Run `f` on the navigator, its grid in place, without the GIL (see lib.rs). The grid object stays
+    /// mutably borrowed meanwhile: it holds the stand-in grid, which nobody must read.
+    fn with<R: Send>(&mut self, py: Python<'_>, f: impl FnOnce(&mut Navigator) -> R + Send) -> R {
         let mut grid = self.grid.borrow_mut(py);
         std::mem::swap(self.inner.grid_mut(), &mut grid.inner);
-        let r = f(&mut self.inner);
+        let inner = &mut self.inner;
+        let r = py.detach(|| f(inner));
         std::mem::swap(self.inner.grid_mut(), &mut grid.inner);
         r
     }
@@ -288,21 +293,10 @@ impl PyNavigator {
         v_prev: f64,
     ) -> PyResult<(PyNavOut, PyScan)> {
         let mask = fs.mask(&floor)?;
+        let fs_inner = &mut fs.inner;
         let (out, scan) = self
             .with(py, |nav| {
-                nav.step_mask(
-                    &mut fs.inner,
-                    &mask,
-                    &up_c,
-                    t,
-                    dt,
-                    pose2(pose),
-                    cam_h,
-                    a,
-                    v,
-                    w,
-                    v_prev,
-                )
+                nav.step_mask(fs_inner, &mask, &up_c, t, dt, pose2(pose), cam_h, a, v, w, v_prev)
             })
             .map_err(|e| PyValueError::new_err(e.0))?;
         Ok((out.into(), PyScan::from_core(py, &scan)))

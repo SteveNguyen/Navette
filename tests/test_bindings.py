@@ -1,4 +1,8 @@
-"""The bindings' handling of numpy arrays: an array is read by its values, whatever its memory layout."""
+"""The bindings' handling of numpy arrays (an array is read by its values, whatever its memory layout) and of
+the GIL (released during the long calls)."""
+
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -94,3 +98,87 @@ def test_other_2d_arrays_are_read_by_value_whatever_their_layout(view):
         d, pred = navette.dijkstra(~obst, cost, 0.05, (3, 4))
         d2, pred2 = navette.dijkstra(lay(~obst), lay(cost), 0.05, (3, 4))
         assert np.array_equal(d, d2) and np.array_equal(pred, pred2), name
+
+
+# ------------------------------------------------------------------ the GIL
+
+BEAR = (np.arange(180) + 0.5) * 2.0 - 180
+
+
+def open_scan():
+    seen = np.abs(BEAR) < 35
+    return navette.Scan(BEAR.copy(), seen, np.full(180, np.inf), np.zeros(180, bool), np.where(seen, 2.5, 0.0),
+                        np.where(seen, 0.47, np.inf))
+
+
+def big_known_grid(size_m=60.0):
+    """A grid of known free floor, 1200 cells a side: a plan on it settles 1.4 million cells (tens of ms)."""
+    grid = navette.OccupancyGrid(size_m=size_m)
+    grid.set_map(-size_m / 2, -size_m / 2, np.full((grid.n, grid.n), -1.5, np.float32))
+    return grid
+
+
+def ticks_during(call):
+    """Run call() while another thread wakes every millisecond. Returns (duration of the call (s), the other
+    thread's wake-ups during it, its longest silence during it (s))."""
+    ticks, stop = [], threading.Event()
+
+    def tick():
+        while not stop.is_set():
+            ticks.append(time.perf_counter())
+            time.sleep(0.001)
+
+    th = threading.Thread(target=tick)
+    th.start()
+    time.sleep(0.02)
+    t0 = time.perf_counter()
+    call()
+    t1 = time.perf_counter()
+    time.sleep(0.02)
+    stop.set()
+    th.join()
+    inside = [t for t in ticks if t0 <= t <= t1]
+    edges = [t0, *inside, t1]
+    return t1 - t0, len(inside), max(b - a for a, b in zip(edges, edges[1:]))
+
+
+def test_long_calls_release_the_gil():
+    """A plan over a large map takes tens of ms (0.4 s estimated on the robot's computer for its whole 24 m
+    grid). The runtime's command thread (which feeds the base's dead-man) and the page must run meanwhile."""
+    sc = open_scan()
+    nav = navette.Navigator(behaviour="explore", grid=big_known_grid())
+    planner, grid = navette.FrontierPlanner(), big_known_grid()
+    explore = navette.FrontierExplore()
+    calls = {"Navigator.step": lambda: nav.step(0.0, 0.1, (0.3, 0.3, 0.0), sc, 0.35, 0.0, 0.0, 0.0, 0.0),
+             "FrontierPlanner.plan": lambda: planner.plan(0.0, (0.3, 0.3, 0.0), grid),
+             "FrontierExplore.step": lambda: explore.step(0.0, (0.3, 0.3, 0.0), sc, grid, 0.0)}
+    for name, call in calls.items():
+        duration, n, silence = ticks_during(call)
+        assert duration > 0.02, f"{name} took {duration * 1e3:.1f} ms: not a long call, the test shows nothing"
+        # with the GIL held, the other thread does not wake once during the call
+        assert n >= 0.2 * duration / 0.001 and silence < 0.5 * duration, (name, duration, n, silence)
+    assert planner.done  # it searched the whole map (all known: no frontier)
+
+
+def test_use_from_another_thread_during_a_call_is_an_error_not_garbage():
+    """While a call runs without the GIL, its objects stay borrowed: another thread using them gets
+    RuntimeError (never the navigator's stand-in grid, never a half-updated map)."""
+    sc, grid = open_scan(), big_known_grid()
+    nav = navette.Navigator(behaviour="explore", grid=grid)
+    seen, stop = [], threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                seen.append(nav.grid.masks()[1].shape)
+            except RuntimeError as e:
+                seen.append(str(e))
+
+    th = threading.Thread(target=reader)
+    th.start()
+    for k in range(5):
+        nav.step(1.01 * k, 1.01, (0.3, 0.3, 0.0), sc, 0.35, 0.0, 0.0, 0.0, 0.0)  # replans every step
+    stop.set()
+    th.join()
+    assert set(seen) <= {(grid.n, grid.n), "Already mutably borrowed", "Already borrowed"}, set(seen)
+    assert (grid.n, grid.n) in seen

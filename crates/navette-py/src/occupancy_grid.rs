@@ -206,9 +206,9 @@ impl PyOccupancyGrid {
         if scan.len() < 2 {
             return Err(PyValueError::new_err("the scan needs at least two sectors"));
         }
-        Ok(self
-            .inner
-            .update(t, pose2(pose), &scan, sigma, h, max_range, force))
+        let inner = &mut self.inner;
+        // without the GIL (see lib.rs)
+        Ok(py.detach(|| inner.update(t, pose2(pose), &scan, sigma, h, max_range, force)))
     }
 
     /// Replace the whole map (tests, tools): log_odds (n, n) float32, with the corner of cell [0, 0] at
@@ -226,8 +226,9 @@ impl PyOccupancyGrid {
     }
 
     /// Rebuild the grid from the keyframes (after their poses were corrected).
-    fn replay(&mut self) {
-        self.inner.replay();
+    fn replay(&mut self, py: Python<'_>) {
+        let inner = &mut self.inner;
+        py.detach(|| inner.replay()); // without the GIL (see lib.rs)
     }
 
     /// Clear the map and forget the keyframes; the next update centres the grid again.
