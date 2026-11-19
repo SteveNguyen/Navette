@@ -228,8 +228,12 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start
     assert df < still_m and dth < STILL_RAD, \
         f"dead-man: the base still moves {deadman_s} s after the last command ({df * 100:.1f} cm, " \
         f"{dth:.3f} rad over the next {STILL_WINDOW_S} s; allowed {still_m * 100:.1f} cm, {STILL_RAD} rad)"
-    # after the dead-man: the session goes on, or the base says FAULT (then a new session is started)
-    st = base.status()
+    # after the dead-man: the session goes on, or the base says FAULT (then a new session is started). Watched
+    # for 1 s more: a base may end the session a little later (the Poussah's idle rule, 3.5 s after the last
+    # command, fell right at the first status() read and its FAULT came just after)
+    t_end = clock() + 1.0
+    while (st := base.status()).state != FAULT and clock() < t_end:
+        sleep(PERIOD_S)
     assert st.state in (DRIVING, FAULT), \
         f"after the dead-man: state {st.state}, expected DRIVING (the next command resumes) or FAULT"
     if st.state == FAULT:
