@@ -133,12 +133,15 @@ impl PyScan {
 /// near_tol: an obstacle within near_tol (m) of the closest visible point counts as `near`.
 #[pyclass(name = "FreeSpace", module = "navette")]
 pub struct PyFreeSpace {
-    inner: FreeSpace,
+    pub(crate) inner: FreeSpace,
 }
 
 impl PyFreeSpace {
     /// The mask as a row-major slice (copied only if the array is not contiguous).
-    fn mask<'a>(&self, floor: &'a PyReadonlyArray2<'_, bool>) -> PyResult<std::borrow::Cow<'a, [bool]>> {
+    pub(crate) fn mask<'a>(
+        &self,
+        floor: &'a PyReadonlyArray2<'_, bool>,
+    ) -> PyResult<std::borrow::Cow<'a, [bool]>> {
         let (h, w) = self.inner.shape();
         if floor.shape() != [h, w] {
             return Err(PyValueError::new_err(format!(
