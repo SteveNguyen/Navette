@@ -171,6 +171,23 @@ def test_an_obstacle_the_map_saw_in_the_blind_zone_is_in_its_points():
     assert len(pts) and np.abs(pts[:, 0] - 0.3).max() < 0.05 and np.abs(pts[:, 1]).max() < 0.15
 
 
+def test_keyframes_are_bounded_and_the_grid_keeps_their_evidence():
+    """max_keyframes: the oldest keyframes are dropped. Mapping is unchanged; only a replay loses them."""
+    assert OccupancyGrid().max_keyframes == 4000
+    all_, few = OccupancyGrid(size_m=8.0), OccupancyGrid(size_m=8.0, max_keyframes=5)
+    for k in range(40):  # a standing robot: a keyframe every key_s
+        for g in (all_, few):
+            assert g.update(0.6 * k, (0.01 * k, 0, 0), scan(WALL))
+    assert len(all_.keyframes) == 40 and len(few.keyframes) == 5
+    assert few.keyframes == all_.keyframes[-5:]
+    assert np.array_equal(few.log_odds, all_.log_odds)
+    few.set_keyframe_poses(few.keyframes)
+    few.replay()  # from the 5 kept: weaker evidence, same cells here (the views overlap)
+    assert 0 < np.abs(few.log_odds).sum() < np.abs(all_.log_odds).sum()
+    with pytest.raises(ValueError, match="max_keyframes"):
+        OccupancyGrid(max_keyframes=0)
+
+
 def test_first_frame_is_a_keyframe():
     """The frames of a glance at START reach the grid before any step."""
     grid = OccupancyGrid()

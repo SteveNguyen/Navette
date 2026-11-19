@@ -22,6 +22,8 @@ fn pose2(p: [f64; 3]) -> Pose2 {
 ///   max_obstacle_m  obstacles at or beyond this range are not written
 ///   robot_radius    footprint marked free at each keyframe
 ///   key_m, key_deg, key_s   a keyframe is taken when the robot moved, turned or waited this much
+///   max_keyframes   keyframes kept for replay(); beyond it the oldest are dropped (bounded memory: ~30 MB at
+///                   4000). The grid keeps their evidence; only a later replay() rebuilds without them.
 /// ValueError on an invalid parameter: res, size_m, clamp or sigma_ref <= 0, more than 4096 cells per side
 /// (size_m / res), a negative threshold, range or keyframe distance, anything not finite.
 #[pyclass(name = "OccupancyGrid", module = "navette")]
@@ -47,7 +49,7 @@ impl PyOccupancyGrid {
 impl PyOccupancyGrid {
     #[new]
     #[pyo3(signature = (res=0.05, size_m=24.0, clamp=1.5, thr=0.2, sigma_ref=0.10, max_obstacle_m=2.5,
-                        robot_radius=0.13, key_m=0.1, key_deg=5.0, key_s=0.5))]
+                        robot_radius=0.13, key_m=0.1, key_deg=5.0, key_s=0.5, max_keyframes=4000))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         res: f64,
@@ -60,6 +62,7 @@ impl PyOccupancyGrid {
         key_m: f64,
         key_deg: f64,
         key_s: f64,
+        max_keyframes: usize,
     ) -> PyResult<Self> {
         let params = OccupancyGridParams {
             res,
@@ -72,6 +75,7 @@ impl PyOccupancyGrid {
             key_m,
             key_deg,
             key_s,
+            max_keyframes,
         };
         Ok(Self {
             inner: OccupancyGrid::new(params).map_err(param_err)?,
@@ -93,6 +97,12 @@ impl PyOccupancyGrid {
     #[getter]
     fn thr(&self) -> f64 {
         self.inner.params().thr
+    }
+
+    /// Most keyframes kept for replay().
+    #[getter]
+    fn max_keyframes(&self) -> usize {
+        self.inner.params().max_keyframes
     }
 
     /// Fixed-frame x of the corner of cell [0, 0]; None before the first update.

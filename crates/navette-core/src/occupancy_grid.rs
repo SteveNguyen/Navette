@@ -21,7 +21,8 @@
 //! keyframes flip a cell (a person who stood still and left).
 //!
 //! Keyframes (robot moved key_m, turned key_deg, or key_s elapsed) are kept: [`OccupancyGrid::replay`]
-//! rebuilds the grid from them, e.g. after a SLAM pose correction.
+//! rebuilds the grid from them, e.g. after a SLAM pose correction. Only the last `max_keyframes` are kept
+//! (see [`OccupancyGridParams::max_keyframes`]).
 //!
 //! Frames: poses are in the fixed frame (geometry.rs). Cell [i, j] covers
 //! x in [x0 + i res, x0 + (i + 1) res), y in [y0 + j res, y0 + (j + 1) res); the log-odds array is row-major,
@@ -76,6 +77,13 @@ pub struct OccupancyGridParams {
     pub key_deg: f64,
     /// or after this long (s).
     pub key_s: f64,
+    /// Most keyframes kept for [`OccupancyGrid::replay`]; beyond it the oldest are dropped. A keyframe
+    /// holds its scan (~7 kB at 180 sectors) and a standing robot takes two per second (key_s), so an
+    /// unbounded list grows by ~50 MB an hour; 4000 keyframes are ~30 MB, half an hour of them at least.
+    /// The trade-off: the grid itself keeps the evidence of the dropped keyframes, so mapping and
+    /// navigation are unchanged, but a later `replay()` (after a pose correction) rebuilds the grid from the
+    /// keyframes still kept only: what only the dropped ones saw becomes unknown again.
+    pub max_keyframes: usize,
 }
 
 impl Default for OccupancyGridParams {
@@ -91,6 +99,7 @@ impl Default for OccupancyGridParams {
             key_m: 0.1,
             key_deg: 5.0,
             key_s: 0.5,
+            max_keyframes: 4000,
         }
     }
 }
@@ -115,6 +124,11 @@ impl OccupancyGridParams {
         params::non_negative("OccupancyGridParams.key_m", self.key_m)?;
         params::non_negative("OccupancyGridParams.key_deg", self.key_deg)?;
         params::non_negative("OccupancyGridParams.key_s", self.key_s)?;
+        params::count(
+            "OccupancyGridParams.max_keyframes",
+            self.max_keyframes,
+            usize::MAX,
+        )?;
         let n = self.cells();
         if !(1.0..=MAX_CELLS as f64).contains(&n) {
             return Err(ParamError(format!(
@@ -283,6 +297,9 @@ impl OccupancyGrid {
             max_range,
         });
         self.integrate(self.keyframes.len() - 1);
+        // bounded memory: forget the oldest keyframes (their evidence stays in the grid)
+        let excess = self.keyframes.len().saturating_sub(self.params.max_keyframes);
+        self.keyframes.drain(..excess);
         true
     }
 
@@ -587,6 +604,44 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn only_the_last_keyframes_are_kept_and_the_grid_keeps_their_evidence() {
+        let params = |max_keyframes| OccupancyGridParams {
+            size_m: 8.0,
+            max_keyframes,
+            ..Default::default()
+        };
+        let (mut all, mut few) = (
+            OccupancyGrid::new(params(4000)).unwrap(),
+            OccupancyGrid::new(params(3)).unwrap(),
+        );
+        let sc = scan(
+            |b| if b.abs() < 4.0 { 1.0 } else { f64::INFINITY },
+            38.0,
+            0.4,
+            2.0,
+        );
+        // driving forward 0.2 m per frame: every frame is a keyframe
+        for k in 0..10 {
+            let pose = Pose2::new(0.2 * k as f64, 0.0, 0.0);
+            for g in [&mut all, &mut few] {
+                assert!(g.update(k as f64, pose, &sc, None, 0.35, None, false));
+            }
+        }
+        assert_eq!((all.keyframes().len(), few.keyframes().len()), (10, 3));
+        let kept: Vec<f64> = few.keyframes().iter().map(|k| k.t).collect();
+        assert_eq!(kept, [7.0, 8.0, 9.0]); // the newest
+        assert_eq!(few.keyframes(), &all.keyframes()[7..]);
+        // integration is unchanged: the same grid, bit for bit
+        assert_eq!(few.log_odds(), all.log_odds());
+        // a replay rebuilds from the keyframes kept only
+        few.replay();
+        all.replay();
+        let known = |g: &OccupancyGrid| g.log_odds().iter().filter(|l| l.abs() > 0.2).count();
+        assert!(known(&few) < known(&all) && known(&few) > 0);
+        assert!(OccupancyGrid::new(params(0)).is_err());
     }
 
     #[test]
