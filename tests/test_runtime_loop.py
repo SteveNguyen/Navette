@@ -52,6 +52,32 @@ def test_live_up_interpolates_at_the_capture_time_and_takes_a_given_g():
     assert up.up_at(0.262) == pytest.approx([0, math.sin(0.262), math.cos(0.262)], abs=1e-4)
 
 
+def test_live_up_never_gives_a_non_finite_up():
+    """Samples that are not measurements (zero, NaN) neither spoil the measure of g nor reach the history,
+    whatever the filter answers (FakeUpFilter divides by |acc|; navette.UpFilter answers None)."""
+    acc, zero, nan = np.array([0.0, 0.0, 9.7]), np.zeros(3), np.full(3, np.nan)
+    up = LiveUp(FakeUpFilter, g_window_s=0.2, max_age_s=IMU_MAX_AGE_S)
+    up.add([(0.0, zero, zero), (0.01, zero, nan)] + [(t, zero, acc) for t in np.arange(0.02, 0.3, 0.01)])
+    assert up.upf.g == pytest.approx(9.7) and up.up_at(0.25) == pytest.approx([0, 0, 1])
+    # garbage only from now on: the last valid 'up' ages, and is refused after max_age_s
+    up.add([(t, zero, nan) for t in np.arange(0.3, 0.6, 0.01)])
+    assert up.up_at(0.3) == pytest.approx([0, 0, 1]) and up.up_at(0.5) is None
+
+    class NoUp:  # a filter without an 'up' yet
+        def update(self, t, gyro, acc):
+            return None
+
+    up = LiveUp(lambda g: NoUp(), g=9.8)
+    up.add([(t, zero, acc) for t in np.arange(0, 0.3, 0.01)])
+    assert up.up_at(0.29) is None
+    # a window with no usable sample at all: g is measured on the next one
+    up = LiveUp(FakeUpFilter, g_window_s=0.2, max_age_s=IMU_MAX_AGE_S)
+    up.add([(t, zero, nan) for t in np.arange(0, 0.3, 0.01)])
+    assert up.upf is None and up.up_at(0.29) is None
+    up.add([(t, zero, acc) for t in np.arange(0.3, 0.6, 0.01)])
+    assert up.upf.g == pytest.approx(9.7) and up.up_at(0.59) == pytest.approx([0, 0, 1])
+
+
 # ------------------------------------------------------------------ glance
 
 class Head:
@@ -257,6 +283,28 @@ def test_loop_stale_imu_stops_stepping_and_the_watchdog_halts(tmp_path):
     r.wait(lambda: r.ctrl.state == ctl.IDLE, "the halt")
     assert "no navigator output for 0.5 s" in r.ctrl.reason and world.v == 0.0
     r.end()
+
+
+@pytest.mark.parametrize("what", ["odometry", "camera_pose"])
+def test_loop_takes_no_step_on_non_finite_inputs_and_the_watchdog_halts(tmp_path, what):
+    """A NaN in the base's odometry or in the camera pose: no step (the navigator never sees it), so no
+    output, so the stale-perception watchdog halts the drive."""
+    world = FakeWorld()
+    r = Run(tmp_path, world, cfg=fake_config(stale_s=0.5))
+    r.ctrl.start()
+    r.wait(lambda: world.v > 0, "driving")
+    if what == "odometry":
+        odometry = r.robot.base.odometry
+        r.robot.base.odometry = lambda: odometry()._replace(v=math.nan)
+    else:
+        r.robot.camera.T_base_cam[2, 3] = math.nan  # the camera height is then NaN
+    time.sleep(0.2)  # a step may be under way
+    n = sum(len(nav.steps) for nav in r.navs)
+    r.wait(lambda: r.ctrl.state == ctl.IDLE, "the halt")
+    assert "no navigator output for 0.5 s" in r.ctrl.reason and world.v == 0.0
+    assert sum(len(nav.steps) for nav in r.navs) == n
+    steps, _, _ = r.end()
+    assert all(math.isfinite(float(s[k])) for s in steps for k in ("x", "cam_h", "v"))
 
 
 def test_loop_dry_run_and_no_base_have_no_odometry(tmp_path):

@@ -120,6 +120,20 @@ Not built now: no SLAM code, no map persistence.
 7. **Rust unit tests** (`cargo test`) for the core's own invariants.
 8. **Adapter conformance tests** against the fake robot (units, signs, timestamps, dead-man).
 
+## Deliberate differences from the prototype
+
+The core gives the prototype's outputs on the prototype's inputs (the goldens). Where it departs, it is on
+inputs the prototype handled unsafely, and on purpose:
+
+- **Attitude filter** (`state_estimation/attitude.rs`): a sample with a non-finite value is ignored, and the
+  filter does not start from an accelerometer reading of zero norm (it waits for the next sample). In the
+  prototype one such sample made 'up' NaN for good. `update` returns None until the filter has an 'up'.
+- **Navigator** (`navigator.rs`): a step whose scan has no seen sector returns v = 0 (w, the request and the
+  state as computed; not a `blind_stop`). The collision monitor, unchanged, puts the boundary of unseen
+  sectors at `unseen_m` all round, which lets a robot that sees no floor at all creep forward for ever.
+- **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
+  odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
+
 ## Phases
 
 | # | Work | Verified by | Status |

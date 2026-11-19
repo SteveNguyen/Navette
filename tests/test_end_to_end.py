@@ -50,8 +50,11 @@ class Live:
     """loop.run on a FakeRobot in a thread, with the navigator and the attitude filter the command line
     builds (loop.default_navigator, loop.default_up_filter)."""
 
-    def __init__(self, tmp_path, world, cfg, behaviour="explore"):
-        self.robot, self.world, self.cfg, self.out = FakeRobot(world), world, cfg, tmp_path
+    def __init__(self, tmp_path, world, cfg, behaviour="explore", patch=None, **robot_kw):
+        """patch(robot): changes the fake robot before the loop starts. robot_kw: FakeRobot's."""
+        self.robot, self.world, self.cfg, self.out = FakeRobot(world, **robot_kw), world, cfg, tmp_path
+        if patch is not None:
+            patch(self.robot)
         self.navs, self.logs, self.ctrl, self.stop_event = [], [], None, threading.Event()
         make = loop.default_navigator(cfg, behaviour, cfg.behaviour.forward_v)
 
@@ -169,6 +172,80 @@ def test_forward_stops_before_the_box(tmp_path):
     steps = r.end()
     assert {s["state"] for s in steps} == {"FORWARD"}
     assert float(steps[-1]["v"]) == 0.0 and float(steps[-1]["v_req"]) == 0.15
+
+
+def at_rest(r, seconds=1.0):
+    """Not moving, and not moved for `seconds`."""
+    r.world.advance()
+    x = r.world.x
+    time.sleep(seconds)
+    r.world.advance()
+    return r.world.x == x and not r.moving()
+
+
+@pytest.mark.parametrize("bad", [np.zeros(3), np.full(3, np.nan)], ids=["zero", "nan"])
+def test_a_bad_first_imu_sample_does_not_blind_the_robot(tmp_path, bad):
+    """A wall 1 m ahead, forward behaviour, and an IMU whose very first sample is zero (a driver's first read)
+    or NaN. That one sample used to make 'up' NaN for good: the camera height NaN, a scan that sees nothing,
+    and the collision monitor granting ~0.1 m/s for ever: the robot drove through the wall, no watchdog
+    tripping. Now the sample is ignored and the robot stops before the wall as with a healthy IMU."""
+    world = FakeWorld(wall_x=1.0)
+    first = [True]
+
+    def patch(robot):
+        read = robot.imu.read
+
+        def bad_first():
+            out = read()
+            if out and first[0]:
+                first[0] = False
+                out[0] = (out[0][0], out[0][1], bad)
+            return out
+        robot.imu.read = bad_first
+
+    r = Live(tmp_path, world, fake_config(), behaviour="forward", patch=patch)
+    r.start()
+    r.wait(lambda: world.x > 0.2, "the drive", 15.0)
+    r.wait(lambda: at_rest(r), "the stop", 20.0)
+    sp = r.navs[-1].safety
+    assert sp.radius + sp.margin < 1.0 - world.x < 0.5, world.x  # stopped before the wall
+    assert r.ctrl.state == ctl.DRIVING and not first[0]  # held by the collision monitor
+    steps = r.end()
+    assert all(float(s["cam_h"]) == pytest.approx(0.35, abs=1e-3) for s in steps)
+    assert all(float(s["pitch_down_deg"]) == pytest.approx(20.0, abs=0.2) for s in steps)
+
+
+def test_an_imu_that_turns_to_garbage_halts_the_drive(tmp_path):
+    """Only NaN samples from some moment on: no 'up', so no step and no output, and the stale-perception
+    watchdog halts."""
+    world = FakeWorld(walls=BOX_AHEAD)
+    r = Live(tmp_path, world, fake_config(stale_s=0.5), behaviour="forward")
+    r.start()
+    r.wait(r.moving, "the first motion")
+    read = r.robot.imu.read
+    r.robot.imu.read = lambda: [(t, gyro, np.full(3, np.nan)) for t, gyro, acc in read()]
+    r.wait(lambda: r.ctrl.state == ctl.IDLE, "the halt")
+    assert r.ctrl.reason == "watchdog: no navigator output for 0.5 s" and not r.moving()
+    world.advance()
+    assert world.x < 0.3  # within the watchdog's time of the first bad sample
+    steps = r.end()
+    assert all(math.isfinite(float(s["cam_h"])) and math.isfinite(float(s["v"])) for s in steps)
+
+
+@pytest.mark.parametrize("pitch_down_deg", [-40.0, 90.0], ids=["up", "straight_down"])
+def test_a_camera_that_sees_no_floor_ahead_gives_no_translation(tmp_path, pitch_down_deg):
+    """Camera pitched up (no ray below the horizon: the scan sees nothing at all) or straight down (it only
+    sees the floor under the robot). Open floor, forward behaviour: the robot must not advance. The collision
+    monitor alone let it creep at ~0.1 m/s on a scan that sees nothing."""
+    world = FakeWorld()
+    r = Live(tmp_path, world, fake_config(), behaviour="forward", pitch_down_deg=pitch_down_deg)
+    r.start()
+    time.sleep(2.5)
+    world.advance()
+    assert world.x == 0.0 and world.v == 0.0
+    assert r.ctrl.state == ctl.DRIVING and r.ctrl.sent[0] == 0.0  # fresh outputs, all holding still
+    steps = [s for s in r.end() if s["ctrl"] == "DRIVING"]
+    assert len(steps) > 10 and all(float(s["v"]) == 0.0 and float(s["v_req"]) == 0.15 for s in steps)
 
 
 # ------------------------------------------------------------------ simulated clock

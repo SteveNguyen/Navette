@@ -64,15 +64,19 @@ impl PyUpFilter {
         }
     }
 
-    /// One IMU sample at time t (s): gyro in rad/s, acc in m/s^2, both in IMU axes. Returns u.
+    /// One IMU sample at time t (s): gyro in rad/s, acc in m/s^2, both in IMU axes. Returns u; None before
+    /// the first valid sample (a sample with a non-finite value is ignored, and the filter does not start
+    /// from an accelerometer reading of zero norm).
     fn update<'py>(
         &mut self,
         py: Python<'py>,
         t: f64,
         gyro: [f64; 3],
         acc: [f64; 3],
-    ) -> Bound<'py, PyArray1<f64>> {
-        PyArray1::from_slice(py, &self.inner.update(t, gyro, acc))
+    ) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.inner
+            .update(t, gyro, acc)
+            .map(|u| PyArray1::from_slice(py, &u))
     }
 
     /// 'up' (IMU axes) at time t within the kept history, linearly interpolated; clamped at the ends.

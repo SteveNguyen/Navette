@@ -16,6 +16,14 @@
 //! Frames: pose = the robot in the fixed frame of the odometry (x forward at start, y left, theta
 //! counter-clockwise, rad); the scan is in the camera's heading frame, which is the robot's while the head
 //! looks straight ahead.
+//!
+//! A deliberate difference from the Python prototype: a step whose scan has no seen sector returns v = 0
+//! (w, the request and the state as computed). The collision monitor alone puts the boundary of unseen
+//! sectors at `unseen_m` all round, which still leaves room to creep forward (~0.1 m/s with the robot's
+//! parameters): right for an arc that swings a little out of the view, wrong for a camera that sees no floor
+//! at all (looking straight down or up, a wrong 'up', a mask with no ray below the horizon), where the robot
+//! would advance blind for ever, with finite and fresh outputs that trip no watchdog. The rule is here and
+//! not in `safe_command`, whose outputs stay the prototype's.
 
 use std::f64::consts::TAU;
 
@@ -243,6 +251,13 @@ impl Navigator {
             }
             None => safe_command(v_req, w_req, scan, sp, None, None),
         };
+        // A robot that sees nothing does not translate (see the module documentation). The gate takes it
+        // as any stop; it is not a blind_stop (a look down would not help a camera that sees no floor).
+        let (v_ok, blind_stop) = if scan.seen.iter().any(|&s| s) {
+            (v_ok, blind_stop)
+        } else {
+            (0.0, false)
+        };
         let v_ok = self.gate.step(v_req, v_ok);
         if state != State::Done {
             self.done_since = None;
@@ -421,6 +436,51 @@ mod tests {
             (0.15, 0.0, 0.15, State::Forward)
         );
         assert!(nav.grid().keyframes().is_empty());
+    }
+
+    #[test]
+    fn a_scan_that_sees_nothing_gives_no_translation() {
+        let blind = |pose: Pose2| {
+            let mut s = room_scan(pose, ROOM);
+            let n = s.len();
+            (s.seen, s.near) = (vec![false; n], vec![false; n]);
+            (s.obstacle, s.closest) = (vec![f64::INFINITY; n], vec![f64::INFINITY; n]);
+            s.floor = vec![0.0; n];
+            s
+        };
+        let far = Pose2::new(1.0, 1.5, 0.0);
+        // the collision monitor alone lets a blind robot creep: the boundary is at unseen_m all round
+        let sp = SafetyParams::default();
+        assert!(safe_command(0.15, 0.0, &blind(far), &sp, None, None).0 > 0.05);
+        for odometry in [true, false] {
+            let mut nav = forward(odometry, 2, 0.15);
+            assert!(step(&mut nav, 0.0, far, far).v > 0.1); // sees the room: drives
+            let turned = Pose2::new(1.0, 1.5, -0.1);
+            for k in 1..20 {
+                let out = nav.step(
+                    k as f64 * 0.1,
+                    0.1,
+                    turned,
+                    &blind(turned),
+                    0.35,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.15,
+                );
+                // no translation; the turn (here the heading hold), the request and the state are kept
+                assert_eq!((out.v, out.v_req, out.state), (0.0, 0.15, State::Forward));
+                assert!(out.w > 0.1 && out.w == out.w_req && !out.blind_stop);
+            }
+            // seeing again: the resume gate holds the first clear step, as after any stop
+            assert_eq!(step(&mut nav, 2.0, far, far).v, 0.0);
+            assert!(step(&mut nav, 2.1, far, far).v > 0.1);
+        }
+        let mut nav = Navigator::new(NavigatorParams::default());
+        for k in 0..50 {
+            let out = nav.step(k as f64 * 0.1, 0.1, far, &blind(far), 0.35, 0.0, 0.0, 0.0, 0.0);
+            assert!(out.v == 0.0 && !out.blind_stop && out.w.is_finite());
+        }
     }
 
     #[test]

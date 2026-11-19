@@ -66,6 +66,18 @@ def camera_pose(T_base_cam, up_c, body_z):
     return body_z + float(up_body @ T_base_cam[:3, 3]), math.atan2(fwd[1], fwd[0])
 
 
+def finite_odometry(odom):
+    """odom, or None if one of its values is not finite: that is no odometry (no pose, so no step: a NaN pose
+    or velocity would go through the map and the tilt trust)."""
+    return odom if odom is not None and all(math.isfinite(x) for x in odom) else None
+
+
+def usable_camera_pose(cam_h, cam_heading):
+    """The camera is above the floor at a finite height and heading. Otherwise the scan means nothing (it
+    sees nothing at all with a NaN height), and the loop takes no step."""
+    return math.isfinite(cam_h) and cam_h > 0 and math.isfinite(cam_heading)
+
+
 def pitch_down_deg(up_c):
     """Optical axis angle below the horizon (deg) from 'up' in the camera frame (z optical axis)."""
     return math.degrees(math.asin(float(np.clip(-up_c[2], -1, 1))))
@@ -211,7 +223,8 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
                 continue
             w1 = time.perf_counter()
             # the base right now: the pose of this frame (a frame late by the camera's lag: 6 mm at 0.15 m/s)
-            odom = base.odometry() if base is not None else itf.Odometry(frame.t, 0.0, 0.0, 0.0, 0.0, 0.0)
+            odom = finite_odometry(base.odometry()) if base is not None else \
+                itf.Odometry(frame.t, 0.0, 0.0, 0.0, 0.0, 0.0)
             loc.update(odom)
             in_read = sum(frame.ms.values())  # the adapter's own stages inside read()
             wait_ms, w0 = (w1 - w0) * 1e3 - in_read, None
@@ -222,12 +235,16 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
             w3 = time.perf_counter()
             status.frames = frame.index + 1
             up_c = up.up_at(t)
-            # no step (no output: the stale-perception watchdog halts a drive) while the IMU is not started or
-            # stale, or without odometry
+            # no step (no output: the stale-perception watchdog halts a drive) while the IMU is not started,
+            # stale or gives no finite 'up', without a finite odometry, or with a camera pose that is not
+            # usable: a navigator fed with any of these would answer from a scan that sees nothing
             if up_c is None or loc.pose() is None:
-                status.message = "IMU not ready or stale" if up_c is None else "no odometry from the base"
+                status.message = "IMU not ready or stale" if up_c is None else "no finite odometry from the base"
                 continue
             cam_h, cam_heading = camera_pose(frame.T_base_cam, up_c, cfg.camera.body_z)
+            if not usable_camera_pose(cam_h, cam_heading):
+                status.message = f"camera pose not usable (height {cam_h:.3f} m)"
+                continue
             x, y, th = loc.pose()
             pose = (x, y, th + cam_heading)  # heading: the base's + the camera's in the base frame
             if ctrl.run != nav_run:  # START: a new exploration from here, with an empty map

@@ -24,7 +24,8 @@ import numpy as np
 
 from navette.interfaces import Odometry
 from navette.runtime.localization import OdometryLocalization
-from navette.runtime.loop import STEP_COLS, BaseMotion, camera_pose, free_space, pitch_down_deg, step_row
+from navette.runtime.loop import (STEP_COLS, BaseMotion, camera_pose, finite_odometry, free_space, pitch_down_deg,
+                                  step_row, usable_camera_pose)
 from navette.runtime.up import LiveUp
 
 
@@ -81,7 +82,7 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         t_first = t if t_first is None else t_first
         up.add(imu.read())
         # no base in the recording: the pose stays at the origin
-        odom = base.odometry() if base is not None else Odometry(t, 0.0, 0.0, 0.0, 0.0, 0.0)
+        odom = finite_odometry(base.odometry()) if base is not None else Odometry(t, 0.0, 0.0, 0.0, 0.0, 0.0)
         loc.update(odom)
         if follow is not None:  # a robot run: the frames it stepped, its navigator per START, its v_prev
             if idx not in follow:
@@ -93,6 +94,8 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         if up_c is None or loc.pose() is None:  # as the robot: no step
             continue
         cam_h, cam_heading = camera_pose(frame.T_base_cam, up_c, cfg.camera.body_z)
+        if not usable_camera_pose(cam_h, cam_heading):  # as the robot: no step
+            continue
         x, y, th = loc.pose()
         pose = (x, y, th + cam_heading)
         c0 = time.perf_counter()

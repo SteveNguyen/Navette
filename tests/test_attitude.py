@@ -141,3 +141,19 @@ def test_parameters_and_state_attributes():
     assert np.array_equal(f.u, [0, 0, 1])
     f.b = np.zeros(3)
     assert np.array_equal(f.b, np.zeros(3))
+
+
+def test_samples_that_are_not_measurements_are_ignored():
+    """A zero or non-finite sample used to make 'up' NaN for good (and a NaN 'up' makes the scan see nothing)."""
+    up, zero = np.array([0.0, 0.0, G]), np.zeros(3)
+    f = UpFilter()
+    for acc in (zero, np.full(3, np.nan), np.array([np.inf, 0, 0])):
+        assert f.update(0.0, zero, acc) is None and f.u is None and f.t is None  # no 'up' yet
+    with pytest.raises(ValueError):
+        f.up_at(0.0)
+    assert np.array_equal(f.update(0.01, zero, up), [0, 0, 1])  # the first valid sample starts the filter
+    for k, (gyro, acc) in enumerate([(np.full(3, np.nan), up), (zero, np.full(3, np.nan)), (zero, zero),
+                                     (np.array([0, np.inf, 0]), up)]):
+        u = f.update(0.02 + 0.01 * k, gyro, acc)
+        assert np.isfinite(u).all() and np.isfinite(f.u).all() and np.isfinite(f.b).all()
+    assert np.array_equal(f.up_at(1.0), [0, 0, 1])

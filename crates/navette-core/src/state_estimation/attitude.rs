@@ -109,7 +109,7 @@ impl Default for UpFilterParams {
 #[derive(Clone, Debug)]
 pub struct UpFilter {
     pub params: UpFilterParams,
-    /// 'Up' in IMU axes (unit vector); None before the first sample.
+    /// 'Up' in IMU axes (unit vector); None before the first valid sample.
     pub u: Option<Vec3>,
     /// Gyro bias (rad/s).
     pub b: Vec3,
@@ -152,24 +152,37 @@ impl UpFilter {
         self.rate_lp
     }
 
-    /// One IMU sample at time `t` (s): `gyro` in rad/s, `acc` in m/s^2, both in IMU axes. Returns u.
-    /// A sample not later than the previous one is ignored.
-    pub fn update(&mut self, t: f64, gyro: Vec3, acc: Vec3) -> Vec3 {
+    /// One IMU sample at time `t` (s): `gyro` in rad/s, `acc` in m/s^2, both in IMU axes. Returns u: None
+    /// before the first valid sample.
+    /// A sample not later than the previous one is ignored. So is a sample that is not a measurement: a
+    /// non-finite time, gyro or accelerometer value (a driver's glitch), and, for the first one, an
+    /// accelerometer reading without a direction (zero norm: the filter waits for the next sample). One such
+    /// sample used to make u NaN for good, and a NaN 'up' makes the scan see nothing. The state cannot
+    /// become non-finite: a sample that would make it so (overflow) is ignored as well.
+    pub fn update(&mut self, t: f64, gyro: Vec3, acc: Vec3) -> Option<Vec3> {
+        if !(t.is_finite() && gyro.iter().chain(&acc).all(|x| x.is_finite())) {
+            return self.u;
+        }
         let p = &self.params;
         let a_norm = norm(acc);
         let (Some(mut u), Some(t_prev)) = (self.u, self.t) else {
+            if !(a_norm > 0.0 && a_norm.is_finite()) {
+                return None;
+            }
             // start from the accelerometer
             let u = [acc[0] / a_norm, acc[1] / a_norm, acc[2] / a_norm];
             self.u = Some(u);
             self.t = Some(t);
             self.push(t, u);
-            return u;
+            return Some(u);
         };
         let dt = t - t_prev;
         self.t = Some(t);
         if dt <= 0.0 {
-            return u;
+            return Some(u);
         }
+        // what a rejected sample must leave untouched (see the end)
+        let before = (self.still_since, self.rate_lp);
         let mut b = self.b;
         let acc_err = (a_norm / p.g - 1.0).abs();
 
@@ -205,7 +218,8 @@ impl UpFilter {
             };
             trust *= (1.0 - self.rate_lp / rate_gate).max(0.0);
         }
-        if trust > 0.0 {
+        // a_norm = 0 has no direction (and trust = 0 there for any acc_gate <= 1)
+        if trust > 0.0 && a_norm > 0.0 {
             let n = [acc[0] / a_norm, acc[1] / a_norm, acc[2] / a_norm];
             // e = u x a/|a|, |e| = sin(angle between u and the accelerometer)
             let e = [
@@ -222,10 +236,16 @@ impl UpFilter {
         }
         let n = norm(u);
         let u = [u[0] / n, u[1] / n, u[2] / n];
+        if !u.iter().chain(&b).all(|x| x.is_finite()) {
+            // finite inputs, but the arithmetic overflowed (absurd rates or time step): not a measurement
+            (self.still_since, self.rate_lp) = before;
+            self.t = Some(t_prev);
+            return self.u;
+        }
         self.u = Some(u);
         self.b = b;
         self.push(t, u);
-        u
+        Some(u)
     }
 
     fn push(&mut self, t: f64, u: Vec3) {
@@ -292,11 +312,65 @@ mod tests {
         let mut f = UpFilter::new(UpFilterParams::default(), None);
         assert!(f.u.is_none() && f.up_at(0.0).is_none());
         let u = f.update(1.0, [0.0; 3], [0.0, 0.0, 2.0 * G]);
-        assert_eq!(u, [0.0, 0.0, 1.0]);
+        assert_eq!(u, Some([0.0, 0.0, 1.0]));
         // not later than the previous sample: ignored, whatever it says
         assert_eq!(f.update(1.0, [1.0, 0.0, 0.0], [G, 0.0, 0.0]), u);
         assert_eq!(f.update(0.5, [1.0, 0.0, 0.0], [G, 0.0, 0.0]), u);
         assert_eq!(f.t(), Some(0.5));
+    }
+
+    #[test]
+    fn waits_for_a_first_sample_with_a_direction() {
+        let mut f = UpFilter::new(UpFilterParams::default(), None);
+        // zero accelerometer (a driver's first read), NaN, inf, an overflowing norm: no 'up' yet
+        for acc in [
+            [0.0; 3],
+            [f64::NAN, 0.0, G],
+            [0.0, f64::INFINITY, 0.0],
+            [1e200, 1e200, 0.0],
+        ] {
+            assert_eq!(f.update(0.0, [0.0; 3], acc), None);
+            assert!(f.u.is_none() && f.t().is_none() && f.up_at(0.0).is_none());
+        }
+        assert_eq!(f.update(0.0, [f64::NAN, 0.0, 0.0], [0.0, 0.0, G]), None);
+        assert_eq!(f.update(f64::NAN, [0.0; 3], [0.0, 0.0, G]), None);
+        // the next valid sample starts the filter, as if it were the first
+        assert_eq!(f.update(0.01, [0.0; 3], [0.0, 0.0, G]), Some([0.0, 0.0, 1.0]));
+        assert_eq!(f.up_at(0.01), Some([0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_non_finite_sample_is_ignored_and_the_state_stays_finite() {
+        let up = up_tilted(10.0);
+        let acc = up.map(|x| x * G);
+        let run = |bad: &[(f64, Vec3, Vec3)]| {
+            let mut f = UpFilter::new(UpFilterParams::default(), None);
+            for k in 0..200 {
+                let t = k as f64 * 0.01;
+                if k == 100 {
+                    for &(dt, gyro, acc) in bad {
+                        let before = (f.u, f.b, f.t(), f.still_since(), f.rate_lp());
+                        assert_eq!(f.update(t + dt, gyro, acc), before.0);
+                        assert_eq!((f.u, f.b, f.t(), f.still_since(), f.rate_lp()), before);
+                    }
+                }
+                f.update(t, [0.01, 0.0, 0.0], acc);
+            }
+            (f.u.unwrap(), f.b)
+        };
+        let nan = f64::NAN;
+        let bad = [
+            (-0.005, [nan, 0.0, 0.0], acc),
+            (-0.005, [0.0; 3], [0.0, nan, 0.0]),
+            (-0.005, [0.0, f64::INFINITY, 0.0], acc),
+            (-0.005, [0.0; 3], [f64::NEG_INFINITY; 3]),
+            (nan, [0.0; 3], acc),
+            (-0.005, [1e300, 1e300, 0.0], acc), // finite, but |gyro| overflows
+        ];
+        // exactly the estimate of the same stream without the bad samples
+        let (u, b) = run(&bad);
+        assert_eq!((u, b), run(&[]));
+        assert!(u.iter().chain(&b).all(|x| x.is_finite()) && angle_deg(u, up) < 5.0);
     }
 
     #[test]
@@ -366,7 +440,7 @@ mod tests {
             let t = k as f64 * dt;
             // |a| = 0 after the first sample: gyro only
             let acc = if k == 0 { [0.0, 0.0, G] } else { [0.0; 3] };
-            ups.push(f.update(t, [0.5 * (3.0 * t).cos(), 0.0, 0.0], acc));
+            ups.push(f.update(t, [0.5 * (3.0 * t).cos(), 0.0, 0.0], acc).unwrap());
         }
         // history_s = 0.5 = 16 dt: samples 83..=99 are kept
         let mid = f.up_at(90.5 * dt).unwrap();
