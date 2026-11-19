@@ -49,9 +49,10 @@ PAGE = """<!doctype html>
 </style></head><body>
 <div><button id="start" onclick="post('start')">START</button>
 <button id="stop" onclick="post('stop')">STOP</button></div>
-<div id="teleop"><div id="pad"><div id="knob"></div></div><div id="speeds">...</div></div>
 <div id="status">...</div>
 <img id="preview" alt="no preview yet">
+<!-- the joystick last, at the bottom: the thumb on it then does not hide the camera image above -->
+<div id="teleop"><div id="speeds">...</div><div id="pad"><div id="knob"></div></div></div>
 <script>
 const TELEOP = __TELEOP__;
 async function post(what, body) {
