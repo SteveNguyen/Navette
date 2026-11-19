@@ -30,6 +30,21 @@ def test_page_and_status():
     assert r.status_code == 200 and r.content == b"\xff\xd8jpeg" and r.headers["content-type"] == "image/jpeg"
 
 
+def test_poll_period_follows_the_page_timeout():
+    """The page's poll is the heartbeat of the page dead-man: with a fixed 0.5 s, a page.timeout_s under it
+    halted every run."""
+    assert page.poll_period(2.0) == 0.5 and page.poll_period(0.0) == 0.5 and page.poll_period(30.0) == 0.5
+    assert page.poll_period(0.4) == pytest.approx(0.1)
+    html = page.page_html(2.0, 2.0)  # the reference robot's config: every 0.5 s, a preview every 4th poll
+    assert "setInterval(poll, 500)" in html and "n++ % 4 === 0" in html and "__" not in html
+    html = page.page_html(0.4, 2.0)
+    assert "setInterval(poll, 100)" in html and "n++ % 20 === 0" in html
+    ctrl = lr.Controller(None, 0.15, 0.5, log=lambda m: None)
+    app = page.new_app()
+    page.add_routes(app, ctrl, Status(), timeout_s=0.8, preview_s=1.0)
+    assert "setInterval(poll, 200)" in TestClient(app).get("/").text
+
+
 def test_start_stop():
     c, ctrl, _ = client()
     assert c.post("/api/start", json={}).json() == {"ok": True, "status": "starting"}

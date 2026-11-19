@@ -35,6 +35,16 @@ up_g_s = 1.0
 # Height of the Mini's body frame above the floor when on the base. NOT MEASURED: 0.325 puts the camera at
 # ~0.35 m. (Mini standing on the floor: 0.215.)
 body_z = 0.325
+# Radius around the robot the camera cannot see at its navigation pose (the closest visible floor is at
+# ~0.47 m): the planner's blind disk.
+blind_m = 0.5
+
+[explore]
+# Candidate speeds of the arc controller. The collision monitor allows up to safety.v_max, and controller.v_max
+# (0.15) then scales the command down, keeping its curvature: with these values the controller prefers its
+# fastest admissible arc and the robot drives it at the cap (0.2 and 0.3 are both sent as 0.15). To make it
+# choose among speeds the robot really drives, list speeds under controller.v_max.
+v_set = [0.1, 0.2, 0.3]
 
 [behaviour]
 default = "explore"
@@ -50,7 +60,8 @@ start_timeout_s = 10.0 # stand-up: measured 0.25 s
 [page]
 port = 8090
 # The phone's STOP goes over the robot's WiFi, which once dropped completely while the robot kept exploring
-# over Bluetooth. The page polls every 0.5 s; a run halts when the polls stop for this long. 0 = off.
+# over Bluetooth. The page polls every 0.5 s (or timeout_s / 4 if shorter); a run halts when the polls stop for
+# this long. 0 = off.
 timeout_s = 2.0
 # The CM4's WiFi and Bluetooth share one radio: a preview every 0.5 s coincided with a 0.9 s stall of the
 # base's telemetry.

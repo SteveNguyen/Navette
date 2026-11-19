@@ -45,7 +45,7 @@ class Controller:
     def __init__(self, base, v_max, w_max, dry_run=False, stale_s=0.3, start_timeout_s=10.0,
                  clock=time.monotonic, on_command=None, log=print, page_timeout_s=0.0):
         """page_timeout_s > 0: page dead-man. While STARTING / DRIVING, halt if no page_alive() (the status
-        page's poll, every 0.5 s) for this long: the page's STOP needs the robot's WiFi, which can drop while
+        page's poll, every 0.5 s or a quarter of this timeout) for this long: the page's STOP needs the robot's WiFi, which can drop while
         the robot keeps driving. START itself counts as a heartbeat."""
         self.base, self.v_max, self.w_max, self.dry_run = base, v_max, w_max, dry_run
         self.stale_s, self.start_timeout_s, self.clock = stale_s, start_timeout_s, clock

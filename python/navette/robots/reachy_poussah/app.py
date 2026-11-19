@@ -26,6 +26,9 @@ class NavetteApp(ReachyMiniApp):
             raise RuntimeError("settings_app is not initialized")
         args = cli.build_parser().parse_args(["--robot", os.environ.get("NAVETTE_ROBOT", "robots/reachy_poussah.toml"),
                                               "--out", os.environ.get("NAVETTE_OUT", "/home/pollen/navette_runs")])
+        port = cli.load_config(args).page.port
+        if not (self.custom_app_url or "").endswith(f":{port}"):  # the SDK serves the page, not the config
+            self.logger.warning(f"the page is at {self.custom_app_url}: the config's page.port ({port}) is not used")
         cli.run_robot(args, stop_event, self.settings_app, log=self.logger.info, mini=reachy_mini)
 
 

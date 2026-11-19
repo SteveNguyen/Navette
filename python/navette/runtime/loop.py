@@ -137,13 +137,45 @@ class Status:
                 "cam_h": self.cam_h, "pitch": self.pitch, "message": self.message}
 
 
-def new_navigator(cfg, behaviour, forward_v, odometry):
-    """A navette.Navigator with the config's collision monitor parameters and resume gate. The grid, the
-    planner, the arc controller and the tilt trust keep the core's defaults: no robot config sets them."""
+MOVING_V = 0.05  # m/s: applied speed from which the arc controller counts the robot as moving (its default)
+
+
+def navigator_params(cfg):
+    """The core's parameter objects for a robot config: {"safety": SafetyParams, "grid": OccupancyGrid's
+    keyword arguments, "frontier": FrontierParams, "explore": ExploreParams}. Everything that depends on the
+    robot's geometry and speeds is derived here, in one place, from the config; the rest keeps the core's
+    defaults (tuning, not geometry):
+      footprint.radius            -> the footprint the grid marks free
+      footprint.radius + margin   -> the distance the planner's paths keep from obstacles (the collision
+                                     monitor's clearance)
+      camera.blind_m              -> the planner's blind disk
+      explore.v_set               -> the arc controller's candidate speeds, without those above safety.v_max
+                                     (the collision monitor would cut them; if none is left: safety.v_max)
+      "moving" threshold          -> MOVING_V, or half the slowest speed the robot is sent if that is less
+                                     (the slowest candidate, or controller.v_max): a slow robot is not
+                                     "blocked" for driving slowly
+    The controller's cap (controller.v_max) is applied to the command afterwards (Controller, cap_speed), as
+    the Python prototype did: it does not remove candidates here."""
     import navette
 
-    return navette.Navigator(navette.SafetyParams(**cfg.safety_params()), behaviour=behaviour, odometry=odometry,
-                             resume_n=cfg.behaviour.resume_n, forward_v=forward_v)
+    radius, margin = cfg.footprint.radius, cfg.footprint.margin
+    v_set = [v for v in cfg.explore.v_set if v <= cfg.safety.v_max] or [cfg.safety.v_max]
+    moving_v = min(MOVING_V, 0.5 * min(min(v_set), cfg.controller.v_max))
+    return {"safety": navette.SafetyParams(**cfg.safety_params()),
+            "grid": {"robot_radius": radius},
+            "frontier": navette.FrontierParams(clear=radius + margin, blind=cfg.camera.blind_m),
+            "explore": navette.ExploreParams(v_set=v_set, moving_v=moving_v, rotate_in_place=True)}
+
+
+def new_navigator(cfg, behaviour, forward_v, odometry):
+    """A navette.Navigator for a robot config (navigator_params) with its resume gate. The single place
+    where the runtime builds one."""
+    import navette
+
+    p = navigator_params(cfg)
+    return navette.Navigator(p["safety"], behaviour=behaviour, odometry=odometry, resume_n=cfg.behaviour.resume_n,
+                             forward_v=forward_v, grid=navette.OccupancyGrid(**p["grid"]), frontier=p["frontier"],
+                             explore=p["explore"])
 
 
 def default_navigator(cfg, behaviour, forward_v):
@@ -210,7 +242,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
         if web_app is not None:
             from navette.runtime.page import add_routes
 
-            add_routes(web_app, ctrl, status)
+            add_routes(web_app, ctrl, status, cfg.page.timeout_s, cfg.page.preview_s)
 
         steps_f = open(os.path.join(out_dir, "steps.csv"), "w", newline="", buffering=1)
         files.append(steps_f)

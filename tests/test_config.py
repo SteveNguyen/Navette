@@ -25,7 +25,8 @@ def test_reachy_poussah_values():
     assert cfg.controller.start_timeout_s == 10.0 and cfg.perception.imu_max_age_s == 0.1
     assert (cfg.page.port, cfg.page.timeout_s, cfg.page.preview_s) == (8090, 2.0, 2.0)
     assert (cfg.behaviour.default, cfg.behaviour.forward_v, cfg.behaviour.resume_n) == ("explore", 0.15, 2)
-    assert cfg.camera.body_z == 0.325
+    assert cfg.camera.body_z == 0.325 and cfg.camera.blind_m == 0.5
+    assert cfg.explore.v_set == (0.1, 0.2, 0.3)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -65,6 +66,11 @@ def edited(tmp_path, old, new, count=1):
     (r"^resume_n = 2$", "resume_n = 2.5", r"\[behaviour\] resume_n = 2.5: expected int"),
     (r'^default = "explore"$', 'default = "v3"', r"'explore' or 'forward'"),
     (r"^\[page\]$", "[pages]", r"missing tables \['page'\]; unknown tables \['pages'\]"),
+    (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = []", r"\[explore\] v_set = \[\]: expected a non-empty list"),
+    (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = [0.1, 0.0]", r"\[explore\] v_set"),
+    (r"^v_set = \[0.1, 0.2, 0.3\]$", "v_set = 0.1", r"\[explore\] v_set = 0.1: expected a non-empty list"),
+    (r"^v_set = \[0.1, 0.2, 0.3\]$", 'v_set = ["0.1"]', r"\[explore\] v_set"),
+    (r"^blind_m = 0.5$", "blind_m = -0.5", r"\[camera\] blind_m"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),

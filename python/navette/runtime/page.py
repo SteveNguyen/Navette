@@ -1,7 +1,8 @@
 """Status page of the robot loop (navette.runtime.loop): START, STOP, a status line and a camera + map
 preview. Served by the robot over WiFi, by the CLI (uvicorn on page.port) or by the robot's own app server.
 
-  GET  /              the page (polls /api/status every 0.5 s, reloads /api/preview.jpg)
+  GET  /              the page (polls /api/status every poll_period(page.timeout_s), reloads
+                      /api/preview.jpg every page.preview_s)
   GET  /api/status    controller (state, last watchdog / stop reason, v / w sent, speed cap, dry run, base
                       state) + loop (Hz, IMU source, behaviour state, camera height / pitch). Every call is a
                       heartbeat of the controller's page dead-man.
@@ -44,23 +45,42 @@ function fmt(s) {
     `base ${base}\\nIMU ${s.imu}  h ${s.cam_h}  pitch ${s.pitch}\\n` +
     `${s.reason ? 'last: ' + s.reason : ''} ${s.message}`;
 }
-// the preview only every 4th poll (2 s): on a robot whose WiFi and Bluetooth share one radio, a JPEG every
-// 0.5 s coincided with a 0.9 s stall of the base's telemetry and the page losing its connection
+// the preview only every few polls (page.preview_s): on a robot whose WiFi and Bluetooth share one radio, a
+// JPEG every 0.5 s coincided with a 0.9 s stall of the base's telemetry and the page losing its connection
 let n = 0;
 async function poll() {
   try {
     const s = await (await fetch('/api/status')).json();
     document.getElementById('status').textContent = fmt(s);
   } catch (e) { document.getElementById('status').textContent = 'no connection'; }
-  if (n++ % 4 === 0) document.getElementById('preview').src = '/api/preview.jpg?' + Date.now();
+  if (n++ % __PREVIEW_EVERY__ === 0) document.getElementById('preview').src = '/api/preview.jpg?' + Date.now();
 }
-setInterval(poll, 500); poll();
+setInterval(poll, __POLL_MS__); poll();
 </script></body></html>
 """
 
 
-def add_routes(app, ctrl, status):
-    """Page routes on a FastAPI app; ctrl: runtime.controller.Controller, status: runtime.loop.Status."""
+POLL_S = 0.5  # the page's poll period, unless the page dead-man needs it shorter
+
+
+def poll_period(timeout_s):
+    """Poll period (s) of the page for a page dead-man of timeout_s (the config's page.timeout_s; 0 = off):
+    POLL_S, or a quarter of the timeout if that is shorter, so that the dead-man sees at least three polls
+    in its time whatever the config says (a timeout under the fixed 0.5 s halted every run)."""
+    return min(POLL_S, timeout_s / 4) if timeout_s > 0 else POLL_S
+
+
+def page_html(timeout_s=2.0, preview_s=2.0):
+    """The page for a config's page.timeout_s and page.preview_s."""
+    poll_s = poll_period(timeout_s)
+    return PAGE.replace("__POLL_MS__", str(round(poll_s * 1000))).replace(
+        "__PREVIEW_EVERY__", str(max(1, round(preview_s / poll_s))))
+
+
+def add_routes(app, ctrl, status, timeout_s=2.0, preview_s=2.0):
+    """Page routes on a FastAPI app; ctrl: runtime.controller.Controller, status: runtime.loop.Status;
+    timeout_s, preview_s: the config's page.timeout_s and page.preview_s (the page's poll and preview
+    periods follow them)."""
     from fastapi import Request
     from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -73,11 +93,11 @@ def add_routes(app, ctrl, status):
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return PAGE
+        return page_html(timeout_s, preview_s)
 
     @app.get("/api/status")
     def get_status():
-        ctrl.page_alive()  # the page polls every 0.5 s: its heartbeat (Controller page dead-man)
+        ctrl.page_alive()  # the page's poll is its heartbeat (Controller page dead-man)
         return {**ctrl.snapshot(), **status.snapshot()}
 
     @app.post("/api/start")

@@ -26,8 +26,6 @@ use crate::scan::Scan;
 const MAX_N_W: usize = 10_000;
 /// Range (m) of the map obstacles the arcs are checked against.
 const MAP_RANGE_M: f64 = 1.5;
-/// Applied speed (m/s) from which the robot counts as moving.
-const MOVING_V: f64 = 0.05;
 
 /// Arc controller parameters. The defaults are the ones tuned on Reachy Mini.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +54,9 @@ pub struct ExploreParams {
     /// No admissible arc but the goal more than `spin_done_deg` off: turn toward it at once (false: wait
     /// for the blocked timer).
     pub rotate_in_place: bool,
+    /// Applied speed (m/s) from which the robot counts as moving (below it for `blocked_s`: blocked). It
+    /// must stay under the slowest speed the robot is ever sent, or a slow robot is always "blocked".
+    pub moving_v: f64,
 }
 
 impl Default for ExploreParams {
@@ -74,6 +75,7 @@ impl Default for ExploreParams {
             w_spin: 1.0,
             blocked_s: 1.0,
             rotate_in_place: false,
+            moving_v: 0.05,
         }
     }
 }
@@ -97,6 +99,7 @@ impl ExploreParams {
             ("spin_above_deg", self.spin_above_deg),
             ("spin_done_deg", self.spin_done_deg),
             ("blocked_s", self.blocked_s),
+            ("moving_v", self.moving_v),
         ] {
             params::non_negative(&format!("ExploreParams.{name}"), value)?;
         }
@@ -226,7 +229,7 @@ impl ArcController {
             self.blocked_since = None;
             return spin;
         }
-        if best.is_some() && v_applied >= MOVING_V {
+        if best.is_some() && v_applied >= p.moving_v {
             self.blocked_since = None;
         } else if self.blocked_since.is_none() {
             self.blocked_since = Some(t);
@@ -326,6 +329,22 @@ mod tests {
             ..Default::default()
         };
         assert!(ArcController::new(ok(), safety).is_err());
+    }
+
+    #[test]
+    fn moving_threshold_is_a_parameter() {
+        // a slow robot: one candidate at 0.04 m/s, applied as asked. With the default threshold (0.05) it
+        // never counts as moving and is "blocked" on open floor; with a threshold under its speed it is not.
+        for (moving_v, blocked) in [(0.05, true), (0.02, false)] {
+            let params = ExploreParams {
+                v_set: vec![0.04],
+                moving_v,
+                ..Default::default()
+            };
+            let ((v, _), c) = step(params, 0.0, &open(), 0.04);
+            assert_eq!(v, 0.04);
+            assert_eq!(c.blocked_since.is_some(), blocked);
+        }
     }
 
     #[test]

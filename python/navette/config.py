@@ -49,7 +49,17 @@ class Perception:
 
 @dataclass(frozen=True)
 class CameraCfg:
-    body_z: float  # m, height of the base frame's origin (Frame.T_base_cam's reference) above the floor
+    body_z: float   # m, height of the base frame's origin (Frame.T_base_cam's reference) above the floor
+    blind_m: float  # m, radius around the robot the camera cannot see at its navigation pose (the planner's
+    #                 blind disk: about where the lowest image row meets the floor)
+
+
+@dataclass(frozen=True)
+class Explore:
+    """Exploration behaviour (the arc controller)."""
+    v_set: tuple  # m/s, candidate forward speeds. Those above safety.v_max are dropped (the collision monitor
+    #               would cut them). controller.v_max is NOT applied here: the command is scaled down to it
+    #               afterwards, so a candidate above it only says "as fast as allowed"
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,7 @@ class Config:
     safety: Safety
     perception: Perception
     camera: CameraCfg
+    explore: Explore
     behaviour: Behaviour
     controller: ControllerCfg
     page: Page
@@ -116,7 +127,7 @@ class Config:
 
 
 _SECTIONS = {"robot": RobotCfg, "footprint": Footprint, "safety": Safety, "perception": Perception,
-             "camera": CameraCfg, "behaviour": Behaviour, "controller": ControllerCfg, "page": Page,
+             "camera": CameraCfg, "explore": Explore, "behaviour": Behaviour, "controller": ControllerCfg, "page": Page,
              "glance": Glance}
 _NUMBER = {"float": (int, float), "int": (int,), "str": (str,)}
 # Ranges: every number is finite and >= 0; these are > 0 (a zero would divide, never time out, or stop
@@ -136,6 +147,11 @@ def _section(name, cls, raw):
             f"{what} {keys}" for what, keys in (("missing", missing), ("unknown", extra)) if keys))
     for key, kind in names.items():
         v = raw[key]
+        if kind == "tuple":  # a list of speeds
+            if not isinstance(v, list) or not v or not all(
+                    isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x > 0 for x in v):
+                raise ValueError(f"[{name}] {key} = {v!r}: expected a non-empty list of numbers > 0")
+            continue
         if isinstance(v, bool) or not isinstance(v, _NUMBER[kind]):
             raise ValueError(f"[{name}] {key} = {v!r}: expected {kind}")
         if kind != "str":
@@ -144,7 +160,8 @@ def _section(name, cls, raw):
                 raise ValueError(f"[{name}] {key} = {v!r}: must be finite and {'> 0' if positive else '>= 0'}")
     if name == "page" and raw["port"] > 65535:
         raise ValueError(f"[page] port = {raw['port']!r}: must be at most 65535")
-    return cls(**{k: float(v) if names[k] == "float" else v for k, v in raw.items()})
+    convert = {"float": float, "tuple": lambda v: tuple(float(x) for x in v)}
+    return cls(**{k: convert.get(names[k], lambda v: v)(v) for k, v in raw.items()})
 
 
 def load(path):

@@ -198,6 +198,46 @@ def test_base_motion_low_passes_the_acceleration():
     assert loop.BaseMotion().update(None, 0.1) == (0.0, 0.0, 0.0)
 
 
+# ------------------------------------------------------------------ the navigator's parameters
+
+def test_reachy_config_gives_the_core_defaults_exactly():
+    """Robot geometry and speeds now come from the config (loop.navigator_params). For the reference robot
+    they must be, bit for bit, the core's defaults (the parameters of the golden sequences and of every
+    recorded run), plus what its config says of the collision monitor."""
+    import navette
+
+    cfg = config.load(ROBOT_TOML)
+    p = loop.navigator_params(cfg)
+    assert p["frontier"] == navette.FrontierParams()
+    assert p["explore"] == navette.ExploreParams(rotate_in_place=True)  # the Navigator's own default
+    assert p["explore"].v_set == [0.1, 0.2, 0.3] and p["explore"].moving_v == 0.05
+    assert p["grid"] == {"robot_radius": 0.13} and navette.OccupancyGrid(**p["grid"]).n == navette.OccupancyGrid().n
+    assert p["safety"] == navette.SafetyParams(radius=0.13, margin=0.05, v_max=0.4, decel=0.64, latency=0.9 + 0.63,
+                                               unseen_m=0.35, reverse_max=0.0, step=0.02, n_speeds=20)
+    assert p["frontier"].clear == 0.18 == p["safety"].radius + p["safety"].margin and p["frontier"].blind == 0.5
+    nav = loop.new_navigator(cfg, "explore", 0.15, True)
+    assert nav.safety == p["safety"] and (nav.behaviour, nav.resume_n, nav.forward_v) == ("explore", 2, 0.15)
+
+
+def test_a_bigger_slower_robot_gets_its_own_geometry_and_speeds():
+    cfg = config.load(ROBOT_TOML)
+    cfg = cfg.replace("footprint", radius=0.3, margin=0.1).replace("camera", blind_m=0.8)
+    cfg = cfg.replace("safety", v_max=0.08).replace("controller", v_max=0.06)
+    p = loop.navigator_params(cfg)
+    assert p["grid"] == {"robot_radius": 0.3}
+    assert p["frontier"].clear == pytest.approx(0.4) and p["frontier"].blind == 0.8
+    assert p["frontier"].clear == p["safety"].radius + p["safety"].margin  # the collision monitor's clearance
+    # every candidate (0.1, 0.2, 0.3) is above what the collision monitor plans for: one is kept, its v_max
+    assert p["explore"].v_set == [0.08]
+    # the robot is sent 0.06 m/s at most (controller.v_max): it counts as moving from half of that
+    assert p["explore"].moving_v == pytest.approx(0.03)
+    # candidates under safety.v_max are kept, those above dropped; the controller's cap does not remove any
+    p = loop.navigator_params(cfg.replace("explore", v_set=(0.02, 0.07, 0.2)))
+    assert p["explore"].v_set == [0.02, 0.07] and p["explore"].moving_v == pytest.approx(0.01)
+    nav = loop.new_navigator(cfg, "explore", 0.05, True)
+    assert nav.safety.radius == 0.3 and nav.safety.v_max == 0.08
+
+
 # ------------------------------------------------------------------ the loop on the fake robot
 
 def fake_config(**perception):

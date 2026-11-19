@@ -79,4 +79,5 @@ def test_parameters_are_dataclass_like():
     assert ExploreParams().v_set == [0.1, 0.2, 0.3] and not ExploreParams().rotate_in_place
     p.w_spin = 0.5
     assert p == ExploreParams(v_set=(0.1, 0.25), rotate_in_place=True, w_spin=0.5) and p != ExploreParams()
-    assert "rotate_in_place=True" in repr(p)
+    assert "rotate_in_place=True" in repr(p) and "moving_v=0.05" in repr(p)
+    assert ExploreParams().moving_v == 0.05 and ExploreParams(moving_v=0.02) != ExploreParams()
