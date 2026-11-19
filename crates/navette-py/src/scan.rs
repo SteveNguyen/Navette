@@ -137,7 +137,9 @@ pub struct PyFreeSpace {
 }
 
 impl PyFreeSpace {
-    /// The mask as a row-major slice (copied only if the array is not contiguous).
+    /// The mask as a row-major slice: the array's own memory if it is C-contiguous, else a copy in logical
+    /// (row-major) order. `as_slice` alone also accepts a Fortran-contiguous array, whose memory is
+    /// column-major: same shape and values, but read as another picture.
     pub(crate) fn mask<'a>(
         &self,
         floor: &'a PyReadonlyArray2<'_, bool>,
@@ -150,8 +152,8 @@ impl PyFreeSpace {
             )));
         }
         Ok(match floor.as_slice() {
-            Ok(s) => s.into(),
-            Err(_) => floor.as_array().iter().copied().collect(),
+            Ok(s) if floor.is_c_contiguous() => s.into(),
+            _ => floor.as_array().iter().copied().collect(),
         })
     }
 }
