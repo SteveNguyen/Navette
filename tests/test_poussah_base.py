@@ -177,7 +177,10 @@ def test_start_refused_while_the_base_sits_down_after_its_own_stop():
     ok, msg = r.ctrl.start()
     assert not ok and "sitting down" in msg and r.sent() == []
     r.step(st=3)
-    r.step(st=0)  # sat
+    r.step(st=0)  # just landed: still rocking, the base would refuse S0 ("tilt filter off")
+    ok, msg = r.ctrl.start()
+    assert not ok and r.sent() == []
+    r.step(dt=pb.SIT_SETTLE_S, st=0)
     assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
 
 

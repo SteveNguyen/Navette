@@ -50,6 +50,7 @@ STILL_LINES = 3         # consecutive post-stop [nav] lines with still wheels: t
 # with still wheels on the latest [nav], or SETTLE_MAX_S anyway; the navigator only drives after. The sway is
 # not under the collision monitor: start with ~0.3 m clear ahead and behind.
 SETTLE_MIN_S, SETTLE_MAX_S = 2.0, 4.0
+SIT_SETTLE_S = 1.0  # after the base's own sit-down, time on its rest before a new stand-up is asked
 WHEEL_R_DEFAULT = 0.0444  # m, the firmware's default wheel radius, if no [hello] gave r
 SYNC_S = 1.0            # BaseLink.sync() period
 
@@ -81,6 +82,7 @@ class PoussahBase:
         # and releases control; until it sits, a claim is ignored although [nav] still says Balancing (floor
         # test: our nv0,0 then went unanswered, no controller bit). START is refused until it has sat.
         self._sitting_down = False
+        self._sat_at = None  # first Stopped [nav] seen by start() after such a stop
         self._next_sync = clock()
 
     # --- contract
@@ -103,8 +105,13 @@ class PoussahBase:
         nav = self.link.latest()[0]
         if nav is None:
             raise StartRefused("no [nav] from the base")
-        if nav.st == pl.STOPPED:
-            self._sitting_down = False
+        if self._sitting_down and nav.st == pl.STOPPED:
+            # just landed: the base refuses S0 ("tilt filter off") while it still rocks on its rest (floor test:
+            # S0 20 ms after Stopped, tilt still rising 10.8 -> 13.9 deg). Wait SIT_SETTLE_S after landing.
+            if self._sat_at is None:
+                self._sat_at = nav.t_recv
+            if nav.t_recv - self._sat_at >= SIT_SETTLE_S:
+                self._sitting_down, self._sat_at = False, None
         if nav.st not in (pl.STOPPED, pl.LIFTOFF, pl.BALANCING):
             raise StartRefused(f"base state {nav.st} (Stopping): try again")
         if self._sitting_down:
