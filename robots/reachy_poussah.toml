@@ -35,6 +35,18 @@ n_speeds = 20
 stale_s = 0.9
 imu_max_age_s = 0.1
 up_g_s = 1.0
+# Near persistence (the core's default is 1 of 1: off). A scan sector is 'near' when an obstacle fills the image
+# bottom; the collision monitor and the arcs then put it at the clearance radius, which stops or blocks the robot.
+# On the robot the floor model is bi-stable on a doormat and makes small false 'not floor' patches on tiles near an
+# open door: single-frame near sectors. The map averages them out, the scan-level rules did not. Now a sector counts
+# as near only if that bearing (fixed frame: the robot turns between frames) was near in 2 of the last 3 scans; an
+# unconfirmed one stays an obstacle at its seen distance. Cost: one frame (~0.12 s, <= 2 cm at 0.15 m/s) of delay on
+# a real obstacle filling the image bottom, inside footprint.margin. Open-loop replay of a 2822-step exploration:
+# steps with a near sector within 30 deg of ahead 521 -> 466, steps without an admissible arc 893 -> 856.
+# (Raising the scan's min_blob_px from 10 to 30 / 60 removed mostly side near sectors, 521 -> 512 / 500 ahead, and
+# did not reduce the steps without an arc consistently: kept at the core's 10.)
+near_k = 2
+near_n = 3
 
 [camera]
 # Height of the Mini's body frame above the floor when on the base. NOT MEASURED: 0.325 puts the camera at

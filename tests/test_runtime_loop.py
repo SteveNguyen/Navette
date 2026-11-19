@@ -229,8 +229,10 @@ def test_reachy_config_gives_the_core_defaults_exactly():
     nav = loop.new_navigator(cfg, "explore", 0.15, True)
     assert nav.safety == p["safety"] and (nav.behaviour, nav.forward_v) == ("explore", 0.15)
     assert (nav.resume_n, nav.resume_margin) == (4, 0.10)
+    assert (nav.near_k, nav.near_n) == (2, 3)  # near persistence on (floor-model flicker)
     core = navette.Navigator()
     assert (core.resume_n, core.resume_margin) == (2, 0.0)
+    assert (core.near_k, core.near_n) == (1, 1)
 
 
 def test_a_bigger_slower_robot_gets_its_own_geometry_and_speeds():

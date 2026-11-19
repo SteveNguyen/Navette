@@ -12,7 +12,9 @@ what the Python prototype reached there:
   - in a 1 m corridor with a turn and clutter, with the reference robot's config and its latency (commands
     0.46 s late, yaw rate lagging 0.2 s, speeds capped as the runtime does), the exploration switches of
     [explore] (near_known, latched turns, progress-based blocks, replanned recovery) turn less in place and
-    reverse their turns less than the prototype's behaviour, with no collision and the same coverage.
+    reverse their turns less than the prototype's behaviour, with no collision and the same coverage;
+  - single-frame near flicker (the floor model's false patches at the image bottom): with the reference robot's
+    near persistence (2 of 3) the robot drives through it, and still stops for a box that fills the image bottom.
 
 Unlike tests/test_navigator_golden.py (recorded inputs replayed), the loop is closed here: a different command
 changes every later frame.
@@ -225,6 +227,63 @@ def test_exploration_switches_turn_less_in_a_cluttered_corridor_with_latency():
     assert on["blocks"] < off["blocks"]
     assert on["free"] >= 0.95 * off["free"]
     assert off["finished_s"] is not None and on["finished_s"] is not None
+
+
+def forward_with_flicker(near_k, near_n, seed=3, p=0.3):
+    """The reference robot's navigator, forward behaviour, scan alone (odometry=False: no map to explain the box,
+    so the near rule decides the final stop), toward the box 2.2 m ahead. On a random third of the frames, never
+    two within 3 frames, a false patch fills the image bottom for that frame only (the floor model's flicker): 2
+    to 3 sectors at a random bearing within 30 deg of straight ahead read near, at the closest visible floor.
+    Returns (steps' v, the gap to the box at each step, frames with a flicker, the run summary)."""
+    from navette import config
+    from navette.runtime import loop
+
+    cfg = config.load(ROBOT_TOML).replace("perception", near_k=near_k, near_n=near_n)
+    nav = loop.new_navigator(cfg, "forward", cfg.behaviour.forward_v, False)
+    sim = sim2d.Sim(*sim2d.room("box"), seed=1, noise=0.01)
+    rng = np.random.default_rng(seed)
+    vs, gaps, flickers, last = [], [], [], 2  # the first flicker from frame 5 on
+
+    def step(t, dt, pose, scan, cam_h, a, v, w, v_prev):
+        nonlocal last
+        k = len(vs)
+        if k - last >= 3 and rng.random() < p:
+            last = k
+            flickers.append(k)
+            b = rng.uniform(-30.0, 26.0)
+            s = (sim2d.BEARING_DEG >= b) & (sim2d.BEARING_DEG <= b + 4.0) & scan["seen"]
+            scan = {**scan, "obstacle": np.where(s, scan["closest"], scan["obstacle"]),
+                    "floor": np.where(s, scan["closest"], scan["floor"]), "near": scan["near"] | s}
+        out = nav.step(t, dt, pose, Scan(**scan), cam_h, a, v, w, v_prev)
+        vs.append(out.v)
+        gaps.append(3.0 - pose[0])
+        return out
+
+    _, summary = sim2d.run(sim, step, steps=200)
+    return np.array(vs), np.array(gaps), flickers, summary
+
+
+def test_near_persistence_ignores_a_single_frame_flicker_and_still_stops_for_a_real_obstacle():
+    """Floor-model flicker (single-frame near patches) on the way to a box. Without near persistence (1 of 1,
+    the core's default) the first flicker stops the robot far from the box, and every later one again; with
+    the reference robot's 2 of 3, the robot drives through them without a stop and stops where the box fills
+    the image bottom, one frame later at most, without touching it."""
+    sim = sim2d.Sim(*sim2d.room("box"))
+    reach = sim.closest + sim.near_tol  # the box fills the image bottom from this gap on
+    v_off, gap_off, flick_off, off = forward_with_flicker(1, 1)
+    v_on, gap_on, flick_on, on = forward_with_flicker(2, 3)
+    assert not off["collided"] and not on["collided"]
+    assert len(flick_on) > 10  # every one of them is in the robot's way or near it
+    first_stop = lambda v: int(np.flatnonzero((v == 0.0) & (np.arange(len(v)) > 0))[0])  # noqa: E731
+    # off: stopped by a flicker, more than 1 m from the box
+    k = first_stop(v_off)
+    assert k in flick_off and gap_off[k] > 1.0
+    # on: no stop before the box, then stopped by it for good
+    k = first_stop(v_on)
+    assert gap_on[k] <= reach and (v_on[k:] == 0.0).all()
+    # one frame (2 of 3) after the box first filled the image bottom, at 0.15 m/s: within 2 frames' travel
+    assert gap_on[-1] >= reach - 2 * 0.15 * sim2d.DT - 0.02 - 0.03, gap_on[-1]  # 0.03: range noise at 0.5 m
+    assert on["min_clearance"] > 0.13 + 0.05 + 0.1
 
 
 @pytest.mark.parametrize("group", SWITCHES)

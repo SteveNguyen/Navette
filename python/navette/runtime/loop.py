@@ -173,13 +173,15 @@ def navigator_params(cfg):
 
 def new_navigator(cfg, behaviour, forward_v, odometry):
     """A navette.Navigator for a robot config (navigator_params) with its resume gate (resume_n, and the
-    restart hysteresis resume_margin). The single place where the runtime builds one."""
+    restart hysteresis resume_margin) and its near persistence (perception.near_k of near_n). The single place
+    where the runtime builds one."""
     import navette
 
     p = navigator_params(cfg)
     return navette.Navigator(p["safety"], behaviour=behaviour, odometry=odometry, resume_n=cfg.behaviour.resume_n,
                              forward_v=forward_v, grid=navette.OccupancyGrid(**p["grid"]), frontier=p["frontier"],
-                             explore=p["explore"], resume_margin=cfg.behaviour.resume_margin)
+                             explore=p["explore"], resume_margin=cfg.behaviour.resume_margin,
+                             near_k=cfg.perception.near_k, near_n=cfg.perception.near_n)
 
 
 def default_navigator(cfg, behaviour, forward_v):

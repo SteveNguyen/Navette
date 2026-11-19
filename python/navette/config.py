@@ -45,6 +45,8 @@ class Perception:
     stale_s: float         # s, halt if the newest navigator output's frame was captured longer ago than this
     imu_max_age_s: float   # s, no navigation step if the newest IMU sample is older than this at the frame
     up_g_s: float          # s of IMU samples used to measure |g| before the attitude filter starts
+    near_k: int            # near persistence: a scan sector's 'near' flag (obstacle filling the image bottom)
+    near_n: int            # counts only if near in near_k of the last near_n scans; 1 of 1 = off (the core default)
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,8 @@ _SECTIONS = {"robot": RobotCfg, "footprint": Footprint, "safety": Safety, "perce
 _NUMBER = {"float": (int, float), "int": (int,), "str": (str,)}
 # Ranges: every number is finite and >= 0; these are > 0 (a zero would divide, never time out, or stop
 # nothing), and the page port is a port.
-_POSITIVE = {"safety": ("v_max", "decel", "step", "n_speeds"), "perception": ("stale_s", "imu_max_age_s"),
+_POSITIVE = {"safety": ("v_max", "decel", "step", "n_speeds"),
+             "perception": ("stale_s", "imu_max_age_s", "near_k", "near_n"),
              "camera": ("body_z",), "explore": ("spin_w_min",), "controller": ("v_max", "w_max", "cmd_hz", "start_timeout_s"),
              "page": ("port",), "glance": ("n_frames",)}
 
@@ -181,6 +184,8 @@ def _section(name, cls, raw):
                 raise ValueError(f"[{name}] {key} = {v!r}: must be finite and {'> 0' if positive else '>= 0'}")
     if name == "page" and raw["port"] > 65535:
         raise ValueError(f"[page] port = {raw['port']!r}: must be at most 65535")
+    if name == "perception" and raw["near_k"] > raw["near_n"]:
+        raise ValueError(f"[perception] near_k = {raw['near_k']!r}: must be at most near_n ({raw['near_n']!r})")
     convert = {"float": float, "tuple": lambda v: tuple(float(x) for x in v)}
     return cls(**{k: convert.get(names[k], lambda v: v)(v) for k, v in raw.items()})
 

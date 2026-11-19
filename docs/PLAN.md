@@ -150,6 +150,14 @@ inputs the prototype handled unsafely, and on purpose:
   burst, and the stop-and-go at the edge of a blocked zone produces such bursts (the reference robot: 0.10 m,
   `resume_n` 4). Stops decided by the `near` rule (an obstacle off the image bottom that the map does not
   explain) do not depend on the margin, so the hysteresis does not change them.
+- **Near persistence** (`navigator.rs`, `NearFilter`, `near_k` of `near_n`; 1 of 1 by default so the goldens are
+  unchanged; the reference robot: 2 of 3, `[perception]`): a scan sector counts as `near` only if that bearing
+  was near in at least `near_k` of the last `near_n` scans, bearings compared in the fixed (odometry) frame
+  (+-1 sector). Applied where the navigator receives the scan, so the map's blind check, the behaviour and the
+  collision monitor see the same flags. An unconfirmed near sector keeps its obstacle distance as a normal one.
+  On the robot the floor model is bi-stable on a doormat and makes single-frame false patches near an open
+  door, which stopped or blocked the robot. Cost: k - 1 frames of delay on a real obstacle filling the image
+  bottom (one frame, ~0.12 s, <= 2 cm at 0.15 m/s with 2 of 3), inside the margin.
 - **Exploration behaviour switches** (`ExploreParams`, `[explore]` in the robot config; each off by default so
   the goldens are unchanged, the reference robot turns them on). Measured on a 4-minute exploration of the
   reference robot: 54 % of the time turning in place, ~16 turn reversals, 15 blocks of which 14 came from the

@@ -36,6 +36,8 @@ def test_reachy_poussah_values():
     assert (cfg.explore.blocked_s, cfg.explore.blocked_progress, cfg.explore.progress_m, cfg.explore.progress_deg) == (
         3.0, True, 0.05, 17.0)
     assert (cfg.explore.recover_replan, cfg.explore.recover_hold_s) == (False, 0.0)  # C off: unproven
+    # near persistence: the floor model's single-frame flicker at the image bottom (the core's default: 1 of 1)
+    assert (cfg.perception.near_k, cfg.perception.near_n) == (2, 3)
     assert cfg.glance.n_frames == 2 and isinstance(cfg.glance.n_frames, int)
     a = cfg.adapter
     assert a["glance_pitch_deg"] == 0  # the head glance is off: it upset the balancing base
@@ -114,6 +116,11 @@ def edited(tmp_path, old, new, count=1):
     (r"^resume_margin = 0.10$", "resume_margin = -0.1", r"\[behaviour\] resume_margin = -0.1: must be finite and >= 0"),
     (r"^resume_margin = 0.10$", "resume_margin = nan", r"\[behaviour\] resume_margin = nan"),
     (r"^resume_margin = 0.10$", "resume_margin = inf", r"\[behaviour\] resume_margin = inf"),
+    (r"^near_k = 2$", "", r"\[perception\]: missing \['near_k'\]"),
+    (r"^near_k = 2$", "near_k = 0", r"\[perception\] near_k = 0: must be finite and > 0"),
+    (r"^near_k = 2$", "near_k = 2.0", r"\[perception\] near_k = 2.0: expected int"),
+    (r"^near_k = 2$", "near_k = 4", r"\[perception\] near_k = 4: must be at most near_n \(3\)"),
+    (r"^near_n = 3$", "near_n = 0", r"\[perception\] near_n = 0: must be finite and > 0"),
 ])
 def test_bad_config_is_an_error(tmp_path, old, new, message):
     with pytest.raises(ValueError, match=message):

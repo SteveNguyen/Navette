@@ -100,9 +100,12 @@ impl PyNavOut {
 ///   resume_margin  m, restart hysteresis: after a stop, a step counts toward resuming only if the request
 ///               also fits with the collision monitor's margin + resume_margin (stops stay at the normal
 ///               margin); 0 = none
+///   near_k, near_n  near persistence: a sector is near only if near in at least near_k of the last near_n
+///               scans (bearings compared in the fixed frame); 1 of 1 = no filter
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
-/// centres, path and target in the fixed frame, for display; safety, behaviour, odometry, resume_n,
-/// forward_v, resume_margin as given; blocks: recovery turns started so far.
+/// centres, path and target in the fixed frame, for display; near: the near flags the last step used (after
+/// the near filter; empty before the first step); safety, behaviour, odometry, resume_n, forward_v,
+/// resume_margin, near_k, near_n as given; blocks: recovery turns started so far.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
 /// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
@@ -142,7 +145,7 @@ fn core_scan(py: Python<'_>, scan: &PyScan) -> PyResult<Scan> {
 impl PyNavigator {
     #[new]
     #[pyo3(signature = (safety=None, behaviour="explore", odometry=true, resume_n=2, forward_v=0.15, grid=None,
-                        frontier=None, explore=None, tilt_trust=None, resume_margin=0.0))]
+                        frontier=None, explore=None, tilt_trust=None, resume_margin=0.0, near_k=1, near_n=1))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -156,6 +159,8 @@ impl PyNavigator {
         explore: Option<PyRef<'_, PyExploreParams>>,
         tilt_trust: Option<PyRef<'_, PyTiltTrust>>,
         resume_margin: f64,
+        near_k: u32,
+        near_n: u32,
     ) -> PyResult<Self> {
         let behaviour = match behaviour {
             "explore" => Behaviour::Explore,
@@ -184,6 +189,8 @@ impl PyNavigator {
             resume_n,
             resume_margin,
             forward_v,
+            near_k,
+            near_n,
             // the navigator's own grid only stands in for the Python object's between calls: one cell
             grid: OccupancyGridParams {
                 size_m: grid_params.res,
@@ -257,6 +264,22 @@ impl PyNavigator {
     #[getter]
     fn forward_v(&self) -> f64 {
         self.inner.params().forward_v
+    }
+
+    #[getter]
+    fn near_k(&self) -> u32 {
+        self.inner.params().near_k
+    }
+
+    #[getter]
+    fn near_n(&self) -> u32 {
+        self.inner.params().near_n
+    }
+
+    /// The near flags the last step used (after the near filter); empty before the first step.
+    #[getter]
+    fn near<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_slice(py, self.inner.near())
     }
 
     /// Blocks (recovery turns started) of the exploration behaviour since the start or the last reset.

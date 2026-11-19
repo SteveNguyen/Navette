@@ -200,6 +200,42 @@ def test_resume_margin_restart_hysteresis():
         Navigator(resume_margin=float("nan"))
 
 
+def patch_scan(near, theta_deg=0.0):
+    """wall_scan(2.0) with, if near, a patch filling the image bottom at 0.45 m in the sectors within 3 deg of
+    straight ahead in the fixed frame, seen from heading theta_deg."""
+    s = wall_scan(2.0)
+    if not near:
+        return s
+    k = np.abs(BEAR + theta_deg) < 3.0
+    obst, floor, closest, near_ = (np.array(s.obstacle), np.array(s.floor), np.array(s.closest),
+                                   np.array(s.near))
+    obst[k], floor[k], closest[k], near_[k] = 0.45, 0.45, 0.45, True
+    return Scan(BEAR, np.array(s.seen), obst, near_, floor, closest)
+
+
+def test_near_persistence():
+    """near_k of near_n: a single-frame near patch is a far obstacle; one that stays stops the robot from its
+    second frame; bearings compared in the fixed frame. 1 of 1 (default): the scan's own flags."""
+    plain = Navigator(behaviour="forward", odometry=False, resume_n=1)
+    nav = Navigator(behaviour="forward", odometry=False, resume_n=1, near_k=2, near_n=3)
+    assert (plain.near_k, plain.near_n, nav.near_k, nav.near_n) == (1, 1, 2, 3)
+    assert len(nav.near) == 0
+    clock = itertools.count()
+
+    def v(n, near, theta_deg=0.0):
+        pose = (0.0, 0.0, math.radians(theta_deg))
+        return n.step(next(clock) * 0.1, 0.1, pose, patch_scan(near, theta_deg), 0.35, 0.0, 0.0, 0.0, 0.0).v
+
+    assert v(plain, True) == 0.0 and np.array_equal(plain.near, np.array(patch_scan(True).near))
+    assert v(nav, False) > 0 and v(nav, True) > 0 and not nav.near.any()  # one frame: not near
+    assert v(nav, False) > 0 and v(nav, False) > 0  # the flicker leaves the window
+    assert v(nav, True, 8.0) > 0  # turned 8 deg: the same fixed bearing, 2 of the last 3 from the next one
+    assert v(nav, True, 12.0) == 0.0 and nav.near.sum() == 2
+    for k, n in ((0, 1), (3, 2)):
+        with pytest.raises(ValueError, match="near_k"):
+            Navigator(near_k=k, near_n=n)
+
+
 def test_nav_out_is_dataclass_like():
     out = NavOut(0.1, 0.2, 0.3, 0.4, "DRIVE", False)
     assert (out.v, out.w, out.v_req, out.w_req, out.state, out.finished, out.blind_stop) == (

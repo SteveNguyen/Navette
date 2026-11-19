@@ -3,8 +3,10 @@
 //! Per frame, in this order:
 //!
 //! ```text
+//! near filter  NearFilter::apply: a near sector counts only if near in near_k of the last near_n scans
+//!              (fixed-frame bearings); every step below sees the filtered flags   (off by default)
 //! tilt trust   TiltTrust::update(dt, a, v, w) from the base motion; trusted range for the map
-//! blind zone   OccupancyGrid::blind_known(pose, scan): which image-bottom obstacles the map explains,
+//! blind zone  OccupancyGrid::blind_known(pose, scan): which image-bottom obstacles the map explains,
 //!              asked BEFORE this frame goes in (the scan must not explain itself)
 //! map          OccupancyGrid::update(t, pose, scan, sigma, cam_h, trusted range)    (keyframes only)
 //! behaviour    FrontierExplore::step(t, pose, scan, grid, v_prev), or the constant forward request
@@ -30,7 +32,14 @@
 //! request must fit with `resume_margin` more clearance, `resume_n` steps in a row, before the robot moves
 //! again; stops are unchanged. A self-balancing base still travels the lag it built after any stop, and most
 //! after a short start-stop burst, which the stop-and-go at the edge of a blocked zone produces.
+//!
+//! Another, active only with `near_k > 1` (1 of 1 by default): near persistence ([`NearFilter`]). A sector's
+//! `near` flag (an obstacle filling the image bottom, which the collision monitor and the arcs put at the
+//! clearance radius) counts only if that bearing was near in at least `near_k` of the last `near_n` scans.
+//! The floor model flickers: single-frame false "not floor" patches at the image bottom (a bi-stable doormat,
+//! tiles near an open door) stopped or blocked the robot, while the map averages them out over time.
 
+use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
 use crate::collision_monitor::{safe_command, SafetyParams};
@@ -81,6 +90,10 @@ pub struct NavigatorParams {
     pub resume_margin: f64,
     /// The forward behaviour's request (m/s).
     pub forward_v: f64,
+    /// Near persistence ([`NearFilter`]): a sector is `near` only if near in at least `near_k` of the last
+    /// `near_n` scans, this one included. 1 <= near_k <= near_n; near_k = 1: no filter (the prototype).
+    pub near_k: u32,
+    pub near_n: u32,
     pub grid: OccupancyGridParams,
     pub frontier: FrontierParams,
     pub explore: ExploreParams,
@@ -97,6 +110,8 @@ impl Default for NavigatorParams {
             resume_n: 2,
             resume_margin: 0.0,
             forward_v: 0.15,
+            near_k: 1,
+            near_n: 1,
             grid: OccupancyGridParams::default(),
             frontier: FrontierParams::default(),
             explore: ExploreParams {
@@ -109,8 +124,8 @@ impl Default for NavigatorParams {
 }
 
 impl NavigatorParams {
-    /// The parameters of every part, finite forward_v, finite resume_margin >= 0 and the tilt trust
-    /// parameters.
+    /// The parameters of every part, finite forward_v, finite resume_margin >= 0, 1 <= near_k <= near_n and
+    /// the tilt trust parameters.
     pub fn validate(&self) -> Result<(), ParamError> {
         self.safety.validate()?;
         self.grid.validate()?;
@@ -118,6 +133,12 @@ impl NavigatorParams {
         self.explore.validate()?;
         params::finite("NavigatorParams.forward_v", self.forward_v)?;
         params::non_negative("NavigatorParams.resume_margin", self.resume_margin)?;
+        if self.near_k < 1 || self.near_k > self.near_n {
+            return Err(ParamError(format!(
+                "NavigatorParams.near_k = {} (near_n = {}): must be in [1, near_n]",
+                self.near_k, self.near_n
+            )));
+        }
         let t = &self.tilt_trust;
         params::non_negative("TiltTrust.s0", t.s0)?;
         params::positive("TiltTrust.tau_s", t.tau_s)?;
@@ -158,6 +179,74 @@ fn ieee_remainder(x: f64, y: f64) -> f64 {
     }
 }
 
+/// Near persistence: a sector's `near` flag counts only if that bearing was near in at least `k` of the last
+/// `n` scans (this one included). A sector that is near now but not confirmed keeps its obstacle distance as a
+/// normal (far) obstacle: only the "may be closer than seen" flag waits.
+///
+/// The robot turns between frames, so bearings are compared in the fixed (odometry) frame: a sector of this
+/// scan at bearing b (camera frame, deg) is at theta + b; a past scan taken at heading theta_j saw that
+/// direction at theta + b - theta_j, and counts if any of its sectors within +-1 sector of it was near (the
+/// heading error between frames and a patch straddling a sector edge).
+///
+/// Safety: a real obstacle filling the image bottom stays near frame after frame, so it is confirmed one frame
+/// later with 2 of 3 (k - 1 frames in general). One frame is ~0.12 s at the robot's ~8 Hz: at <= 0.15 m/s,
+/// <= 2 cm, inside the collision monitor's margin (5 cm); and the unconfirmed sector still stops the robot at
+/// its seen distance (the obstacle stays in the scan). A single-frame false patch is never confirmed.
+#[derive(Clone, Debug)]
+pub struct NearFilter {
+    k: usize,
+    n: usize,
+    /// The last n - 1 scans' raw near flags with the heading (rad) they were taken at, newest first.
+    history: VecDeque<(f64, Vec<bool>)>,
+}
+
+impl NearFilter {
+    pub fn new(k: u32, n: u32) -> Self {
+        Self {
+            k: k as usize,
+            n: n as usize,
+            history: VecDeque::new(),
+        }
+    }
+
+    /// The filtered near flags of `scan`, taken at heading `theta` (rad, fixed frame); the scan's raw flags go
+    /// into the history. Sectors: the full circle in equal sectors from -180 deg, as [`FreeSpace`] makes them.
+    pub fn apply(&mut self, theta: f64, scan: &Scan) -> Vec<bool> {
+        let near = (0..scan.len())
+            .map(|i| {
+                if !scan.near[i] {
+                    return false;
+                }
+                let fixed_deg = theta.to_degrees() + scan.bearing_deg[i];
+                let before = self
+                    .history
+                    .iter()
+                    .filter(|(theta_j, near_j)| near_around(near_j, fixed_deg - theta_j.to_degrees()))
+                    .count();
+                1 + before >= self.k
+            })
+            .collect();
+        self.history.push_front((theta, scan.near.clone()));
+        self.history.truncate(self.n - 1);
+        near
+    }
+
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+}
+
+/// Some sector of `near` (full circle, equal sectors from -180 deg) within +-1 sector of `bearing_deg` is
+/// near. Any bearing: the sector index wraps.
+fn near_around(near: &[bool], bearing_deg: f64) -> bool {
+    let m = near.len() as i64;
+    if m == 0 {
+        return false;
+    }
+    let j = ((bearing_deg + 180.0) / (360.0 / m as f64)).floor() as i64;
+    (-1..=1).any(|d| near[(j + d).rem_euclid(m) as usize])
+}
+
 pub struct Navigator {
     params: NavigatorParams,
     /// The map is used: always by Explore, by Forward only with odometry.
@@ -166,6 +255,9 @@ pub struct Navigator {
     explore: FrontierExplore,
     tilt_trust: TiltTrust,
     gate: ResumeGate,
+    near_filter: NearFilter,
+    /// The near flags the last step used (after the near filter).
+    near: Vec<bool>,
     /// Forward: the heading to hold (the pose's theta at the first step).
     heading0: Option<f64>,
     /// Since when (s) the behaviour has been Done.
@@ -182,10 +274,18 @@ impl Navigator {
             explore: FrontierExplore::new(params.explore.clone(), params.safety, params.frontier)?,
             tilt_trust: params.tilt_trust,
             gate: ResumeGate::new(params.resume_n),
+            near_filter: NearFilter::new(params.near_k, params.near_n),
+            near: Vec::new(),
             heading0: None,
             done_since: None,
             params,
         })
+    }
+
+    /// The near flags of the last step's scan after the near filter (what every part of the step used);
+    /// empty before the first step.
+    pub fn near(&self) -> &[bool] {
+        &self.near
     }
 
     pub fn params(&self) -> &NavigatorParams {
@@ -229,6 +329,8 @@ impl Navigator {
             .expect("the parameters were validated by Navigator::new");
         self.tilt_trust = p.tilt_trust;
         self.gate = ResumeGate::new(p.resume_n);
+        self.near_filter.reset();
+        self.near.clear();
         (self.heading0, self.done_since) = (None, None);
     }
 
@@ -249,6 +351,20 @@ impl Navigator {
         v_prev: f64,
     ) -> NavOut {
         let sp = &{ self.params.safety }; // a copy: `self` is borrowed mutably below
+
+        // near persistence first, so that the map's blind check, the behaviour and the collision monitor all
+        // see the same near flags (skipped with near_k = 1: the scan as given)
+        let filtered;
+        let scan = if self.params.near_k > 1 {
+            filtered = Scan {
+                near: self.near_filter.apply(pose.theta, scan),
+                ..scan.clone()
+            };
+            &filtered
+        } else {
+            scan
+        };
+        self.near.clone_from(&scan.near);
         self.tilt_trust.update(dt, a, v, w, None);
         let known = self.use_map.then(|| self.grid.blind_known(pose, scan, None, 0.1));
         if self.use_map {
@@ -336,7 +452,8 @@ impl Navigator {
     }
 
     /// [`Self::step`] from the floor mask: `fs` turns `floor` (true = floor) into the scan, with 'up' in the
-    /// camera frame `up_c` and the camera height `cam_h`. Returns the scan as well (logs, display).
+    /// camera frame `up_c` and the camera height `cam_h`. Returns the scan as well (logs, display), as `fs`
+    /// made it: the near flags the step used are [`Self::near`].
     #[allow(clippy::too_many_arguments)]
     pub fn step_mask(
         &mut self,
@@ -742,6 +859,118 @@ mod tests {
                 assert_eq!(v(FITS_WIDER), 0.0, "n = {n}");
             }
             assert!(v(FITS_WIDER) > 0.0, "n = {n}");
+        }
+    }
+
+    /// Open floor (a wall 2 m ahead, floor seen from 0.1 m) with, if `near`, a patch filling the image bottom
+    /// in the sectors at `bearing` +-3 deg (camera frame): at 0.45 m, where the camera's view starts there.
+    fn patch_scan(near: bool, bearing: f64) -> Scan {
+        let mut s = wall_scan(2.0);
+        if near {
+            for k in 0..s.len() {
+                if (s.bearing_deg[k] - bearing).abs() < 3.0 {
+                    (s.obstacle[k], s.floor[k], s.closest[k], s.near[k]) = (0.45, 0.45, 0.45, true);
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn near_filter_needs_k_of_the_last_n_scans() {
+        let mut f = NearFilter::new(2, 3);
+        let near_ahead = |f: &mut NearFilter, near: bool| f.apply(0.0, &patch_scan(near, 0.0))[90];
+        assert!(!near_ahead(&mut f, true)); // first time: not confirmed
+        assert!(near_ahead(&mut f, true)); // two in a row
+        assert!(!near_ahead(&mut f, false)); // a sector that is not near now never is
+        assert!(near_ahead(&mut f, true)); // near 2 scans ago and now: 2 of the last 3
+        let mut f = NearFilter::new(2, 3);
+        for near in [true, false, false] {
+            near_ahead(&mut f, near);
+        }
+        // 3 scans ago: out of the window
+        assert!(!near_ahead(&mut f, true));
+        // 1 of 1 and 1 of n: the scan's own flags
+        for n in [1, 3] {
+            let mut f = NearFilter::new(1, n);
+            let s = patch_scan(true, 0.0);
+            assert_eq!(f.apply(0.0, &s), s.near);
+        }
+    }
+
+    #[test]
+    fn near_filter_compares_fixed_frame_bearings() {
+        // the robot turned 10 deg left between the frames: an obstacle straight ahead before is now at -10 deg
+        let turned = 10f64.to_radians();
+        let mut f = NearFilter::new(2, 2);
+        f.apply(0.0, &patch_scan(true, 0.0));
+        let now = f.apply(turned, &patch_scan(true, -10.0));
+        // -11 and -9 deg: confirmed
+        let k = (0..180).position(|k| bearing(k) == -11.0).unwrap();
+        assert!(now[k] && now[k + 1]);
+        // the same patch with the heading not taken into account would be 10 deg off: not confirmed
+        let mut f = NearFilter::new(2, 2);
+        f.apply(0.0, &patch_scan(true, 0.0));
+        assert!(f.apply(0.0, &patch_scan(true, -10.0)).iter().all(|&n| !n));
+        // across +-180 deg: the sector index wraps
+        let mut f = NearFilter::new(2, 2);
+        f.apply(PI, &patch_scan(true, 0.0));
+        assert!(f.apply(-PI + 1e-9, &patch_scan(true, 0.0))[90]);
+    }
+
+    fn forward_near(near_k: u32, near_n: u32) -> Navigator {
+        Navigator::new(NavigatorParams {
+            behaviour: Behaviour::Forward,
+            odometry: false,
+            resume_n: 1,
+            near_k,
+            near_n,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_single_frame_near_patch_does_not_stop_a_persistent_one_does() {
+        let pose = Pose2::new(0.0, 0.0, 0.0);
+        let v = |nav: &mut Navigator, k: usize, near: bool| {
+            let s = patch_scan(near, 0.0);
+            let out = nav.step(k as f64 * 0.1, 0.1, pose, &s, 0.35, 0.0, 0.0, 0.0, 0.0);
+            assert_eq!(nav.near().len(), s.len());
+            out.v
+        };
+        // today (1 of 1): any near frame stops the robot
+        let mut plain = forward_near(1, 1);
+        assert!(v(&mut plain, 0, false) > 0.0);
+        assert_eq!(v(&mut plain, 1, true), 0.0);
+        assert_eq!(plain.near(), patch_scan(true, 0.0).near.as_slice());
+        // 2 of 3: a one-frame flicker is a normal obstacle at 0.45 m, which leaves room to go on
+        let mut nav = forward_near(2, 3);
+        assert!(v(&mut nav, 0, false) > 0.0);
+        assert!(v(&mut nav, 1, true) > 0.0);
+        assert!(nav.near().iter().all(|&n| !n));
+        assert!(v(&mut nav, 2, false) > 0.0);
+        // a patch that stays: stopped from its second frame
+        assert!(v(&mut nav, 3, false) > 0.0);
+        assert!(v(&mut nav, 4, true) > 0.0);
+        assert_eq!(v(&mut nav, 5, true), 0.0);
+        assert_eq!(v(&mut nav, 6, true), 0.0);
+        // reset forgets the history
+        nav.reset();
+        assert!(nav.near().is_empty());
+        assert!(v(&mut nav, 7, true) > 0.0);
+    }
+
+    #[test]
+    fn near_k_must_be_in_1_to_near_n() {
+        for (k, n) in [(0, 1), (2, 1), (4, 3), (0, 0)] {
+            let p = NavigatorParams {
+                near_k: k,
+                near_n: n,
+                ..Default::default()
+            };
+            let err = Navigator::new(p).err().unwrap().0;
+            assert!(err.starts_with("NavigatorParams.near_k"), "{err}");
         }
     }
 

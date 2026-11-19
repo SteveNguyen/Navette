@@ -55,6 +55,8 @@ MASK_SHAPE = (192, 320)  # the reference robot's floor masks
 PROTOTYPE_EXPLORE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0,
                      "blocked_s": 1.0, "blocked_progress": False,
                      "recover_replan": False, "recover_hold_s": 0.0}
+# the [perception] near persistence at the core's default (1 of 1: off)
+PROTOTYPE_PERCEPTION = {"near_k": 1, "near_n": 1}
 
 
 def runs(frames):
@@ -107,8 +109,9 @@ def replayed(run, model=True):
 
     # the prototype's resume gate (the core's defaults): the runs and the reference replays were made with it,
     # before the config's restart hysteresis; and the prototype's exploration behaviour (the core's defaults
-    # of the [explore] switches the config turns on)
+    # of the [explore] switches the config turns on), and no near persistence (the prototype had none)
     cfg = config.load(ROBOT).replace("behaviour", resume_n=2, resume_margin=0.0)
+    cfg = cfg.replace("perception", **PROTOTYPE_PERCEPTION)
     cfg = cfg.replace("explore", **PROTOTYPE_EXPLORE)
     if model and not os.path.exists(cfg.adapter["model"]):
         pytest.skip(f"no floor model at {cfg.adapter['model']} (NAVETTE_ROBOT)")
