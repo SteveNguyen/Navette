@@ -82,8 +82,10 @@ progress_deg = 17.0
 # on the robot). Here: replan first, turn toward the new path's heading; if it is the same way (within 20 deg) or
 # there is none, 90 deg the way the robot was already turning. Then for recover_hold_s the goal does not turn back
 # toward the blocked way (Nav2's recovery: the spin refreshes the map so that the replan changes).
-recover_replan = true
-recover_hold_s = 2.0
+# OFF for now: alone it was worse in the 2-D simulator (10 recoveries vs 6, 185 s vs 137 s to finish), and with
+# blocked_progress on no recovery fired at all. Re-check if recoveries come back on the robot.
+recover_replan = false
+recover_hold_s = 0.0
 
 [behaviour]
 default = "explore"
