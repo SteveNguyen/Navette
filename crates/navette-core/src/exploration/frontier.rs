@@ -319,6 +319,34 @@ pub fn dijkstra(
     res: f64,
     start: usize,
 ) -> (Vec<f64>, Vec<u32>) {
+    dijkstra_to(trav, cost, h, w, res, start, &[])
+}
+
+/// [`dijkstra`], stopped as soon as every traversable cell of `targets` (distinct cells) is settled; with
+/// no traversable target, the whole search.
+///
+/// What the early stop leaves exact: a cell is settled when it leaves the queue with its current cost, and
+/// neither its cost nor its predecessor changes afterwards (later entries cost at least as much, and a cell
+/// is only updated by a strictly smaller cost). Edges cost more than 0, so the cells on the path to a
+/// settled cell were settled before it. Hence the cost of every target and the predecessors along the path
+/// to it are those of the full search: a target not yet settled when the search stops is not traversable
+/// and keeps inf, as in the full search, which never enters such a cell. The cells that are not targets may
+/// hold a provisional cost or inf: only the targets and their paths may be read.
+fn dijkstra_to(
+    trav: &[bool],
+    cost: &[f64],
+    h: usize,
+    w: usize,
+    res: f64,
+    start: usize,
+    targets: &[usize],
+) -> (Vec<f64>, Vec<u32>) {
+    let mut is_target = vec![false; if targets.is_empty() { 0 } else { h * w }];
+    let mut remaining = 0; // traversable targets not settled yet
+    for &c in targets {
+        is_target[c] = trav[c];
+        remaining += trav[c] as usize;
+    }
     let mut d = vec![f64::INFINITY; h * w];
     let mut pred = vec![NO_PRED; h * w];
     let mut queue = BinaryHeap::new();
@@ -333,6 +361,13 @@ pub fn dijkstra(
         // d[v] < dv: a cheaper way to v was found after this entry was queued, and v expanded with it
         if d[v] < dv || !trav[v] {
             continue;
+        }
+        // v is settled (it gets here once: its queue entries have distinct costs)
+        if remaining > 0 && is_target[v] {
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
         }
         for &(di, dj, diag) in &NEIGHBOURS {
             let Some(nb) = neighbour(v, h, w, di, dj).filter(|&nb| trav[nb]) else {
@@ -481,9 +516,6 @@ impl FrontierPlanner {
             .iter()
             .map(|&d| 1.0 + p.soft_k * (1.0 - (d - p.clear) / p.soft_m).clamp(0.0, 1.0))
             .collect();
-        let start = win.robot[0] * w + win.robot[1];
-        let (d, pred) = dijkstra(&trav, &cost, h, w, res, start);
-
         let min_cells = ((p.min_frontier_m / res).round_ties_even() as usize).max(1);
         let min_unknown = (p.min_unknown_m2 / (res * res)).round_ties_even() as usize;
         let cells: Vec<usize> = frontier_cells(&win.obst, &win.free, h, w, min_cells, min_unknown)
@@ -491,6 +523,10 @@ impl FrontierPlanner {
             .enumerate()
             .filter_map(|(c, f)| (f && !in_disk[c]).then_some(c))
             .collect();
+        // Only the costs of the frontier cells and the path to the chosen one are read below: the search
+        // stops once they are all known (see dijkstra_to), which saves the far side of a large known map.
+        let start = win.robot[0] * w + win.robot[1];
+        let (d, pred) = dijkstra_to(&trav, &cost, h, w, res, start, &cells);
         let centres: Vec<Point2> = cells.iter().map(|&c| win.centre(grid, c)).collect();
         // cost of each frontier cell: the path to it + the turn toward it
         let base: Vec<f64> = cells
@@ -650,6 +686,45 @@ mod tests {
 
     fn count(mask: &[bool]) -> usize {
         mask.iter().filter(|&&m| m).count()
+    }
+
+    #[test]
+    fn early_stop_gives_the_targets_and_their_paths_exactly() {
+        // a pseudo-random field: obstacles, varied costs (many equal totals on a grid)
+        let (h, w) = (60, 80);
+        let mut x = 12345u32;
+        let mut rnd = || {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            (x >> 8) as f64 / (1u32 << 24) as f64
+        };
+        let trav: Vec<bool> = (0..h * w).map(|_| rnd() > 0.25).collect();
+        let cost: Vec<f64> = (0..h * w).map(|_| 1.0 + (rnd() * 3.0).floor()).collect();
+        let start = (0..h * w).find(|&c| trav[c] && c > 30 * w + 40).unwrap();
+        let (d, pred) = dijkstra(&trav, &cost, h, w, 0.05, start);
+        // targets near the start, one of them not traversable, one not reachable (if any), the start itself
+        let mut near: Vec<usize> = (0..h * w).filter(|&c| d[c] < 0.4 && c % 7 == 0).collect();
+        near.push(start);
+        near.extend((0..h * w).find(|&c| !trav[c]));
+        near.sort_unstable();
+        near.dedup();
+        let (d2, pred2) = dijkstra_to(&trav, &cost, h, w, 0.05, start, &near);
+        for &c in &near {
+            assert_eq!(d2[c].to_bits(), d[c].to_bits());
+            let mut q = c as u32;
+            while q != NO_PRED && d[c].is_finite() {
+                assert_eq!(pred2[q as usize], pred[q as usize]);
+                q = pred[q as usize];
+            }
+        }
+        // and it did stop early: far cells were not reached
+        let reached = |d: &[f64]| d.iter().filter(|x| x.is_finite()).count();
+        assert!(reached(&d2) < reached(&d) / 2, "{} {}", reached(&d2), reached(&d));
+        // an unreachable traversable target: the whole search, identical
+        let island = (0..h * w).find(|&c| trav[c] && d[c].is_infinite());
+        if let Some(island) = island {
+            assert_eq!(dijkstra_to(&trav, &cost, h, w, 0.05, start, &[island]).1, pred);
+        }
+        assert_eq!(dijkstra_to(&trav, &cost, h, w, 0.05, start, &[]), (d, pred));
     }
 
     #[test]
