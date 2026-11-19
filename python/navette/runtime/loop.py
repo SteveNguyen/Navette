@@ -78,6 +78,21 @@ def usable_camera_pose(cam_h, cam_heading):
     return math.isfinite(cam_h) and cam_h > 0 and math.isfinite(cam_heading)
 
 
+def camera_mount_warning(T_base_cam, radius):
+    """A warning if the camera's mounting is outside what the navigator supports (the Camera contract in
+    navette.interfaces), else None. Limits: MAX_CAMERA_YAW_DEG of yaw, half the footprint radius of
+    horizontal offset."""
+    yaw, offset = itf.camera_mount(T_base_cam)
+    if abs(yaw) > itf.MAX_CAMERA_YAW_DEG:
+        return (f"WARNING: the camera looks {yaw:+.0f} deg off the base's forward axis (limit "
+                f"{itf.MAX_CAMERA_YAW_DEG:.0f}): the navigator takes straight ahead in the image for the "
+                f"driving direction, the robot may drive toward what it does not look at")
+    if offset > 0.5 * radius:
+        return (f"WARNING: the camera is {offset:.2f} m from the base centre horizontally (limit {0.5 * radius:.2f},"
+                f" half the footprint radius): the offset is ignored, ranges are off by up to that much")
+    return None
+
+
 def pitch_down_deg(up_c):
     """Optical axis angle below the horizon (deg) from 'up' in the camera frame (z optical axis)."""
     return math.degrees(math.asin(float(np.clip(-up_c[2], -1, 1))))
@@ -214,6 +229,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
         hold = NavOut(0.0, 0.0, 0.0, 0.0, "GLANCE", False)  # zero velocity while the head glances
         preview = _preview_or_none(log)
         t0, t_prev, t_preview, preview_ms, w0 = None, None, 0.0, 0.0, None
+        mount_checked = False
         status.message = "ready" + (" (DRY RUN)" if dry_run else "")
         log(status.message)
         while not stop_event.is_set():
@@ -222,6 +238,11 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
             if frame is None:
                 continue
             w1 = time.perf_counter()
+            if not mount_checked:  # once: a warning, not a refusal (a head on a neck sits a few degrees off)
+                mount_checked = True
+                warning = camera_mount_warning(frame.T_base_cam, cfg.footprint.radius)
+                if warning:
+                    log(warning)
             # the base right now: the pose of this frame (a frame late by the camera's lag: 6 mm at 0.15 m/s)
             odom = finite_odometry(base.odometry()) if base is not None else \
                 itf.Odometry(frame.t, 0.0, 0.0, 0.0, 0.0, 0.0)

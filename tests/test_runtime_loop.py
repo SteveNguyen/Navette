@@ -144,6 +144,39 @@ def test_camera_pose_height_along_up_and_heading():
     assert h == pytest.approx(0.3 + 0.05 * math.cos(lean) - 0.04 * math.sin(lean))
 
 
+def test_camera_mount_warning():
+    """The loop's one-time check of the Camera contract's mounting limits: yaw off the base's forward axis,
+    horizontal offset against the footprint radius."""
+    T = np.eye(4)
+    T[:3, :3] = camera_rotation(20.0)
+    T[:3, 3] = [0.04, 0.0, 0.3]
+    assert loop.camera_mount_warning(T, 0.13) is None  # 4 cm ahead, looking forward: any height
+    T[:3, 3] = [0.1, 0.0, 0.3]
+    assert "0.10 m from the base centre" in loop.camera_mount_warning(T, 0.13)
+    assert loop.camera_mount_warning(T, 0.3) is None  # a larger robot
+    yaw = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1.0]])
+    T[:3, :3] = yaw @ T[:3, :3]
+    assert "looks +90 deg off" in loop.camera_mount_warning(T, 0.3)
+
+
+def test_loop_warns_once_about_an_unsupported_camera_mounting(tmp_path, monkeypatch):
+    r = Run(tmp_path / "ok", FakeWorld())
+    r.end()
+    assert not [m for m in r.logs if "WARNING" in m]
+    real = FakeRobot.__init__
+
+    def camera_ahead(self, *a, **k):  # the camera 0.4 m ahead of the base centre
+        real(self, *a, **k)
+        self.camera.T_base_cam[0, 3] = 0.4
+
+    monkeypatch.setattr(FakeRobot, "__init__", camera_ahead)
+    r = Run(tmp_path / "off", FakeWorld())
+    time.sleep(0.3)  # more frames: the warning is not repeated
+    r.end()
+    warnings = [m for m in r.logs if "WARNING" in m]
+    assert len(warnings) == 1 and "0.40 m from the base centre" in warnings[0]
+
+
 def test_localization_is_the_odometry_pose():
     from navette.interfaces import Odometry
 

@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from navette.interfaces import DRIVING, FAULT, STARTING, STOPPED
+from navette.interfaces import DRIVING, FAULT, MAX_CAMERA_YAW_DEG, STARTING, STOPPED, camera_mount
 
 STATES = (STOPPED, STARTING, DRIVING, FAULT)
 PERIOD_S = 0.05  # command period used here (20 Hz, as the controller)
@@ -26,9 +26,13 @@ def _on_clock(t, now, what):
     assert now - 2.0 < t <= now + 1e-6, f"{what}: time {t} is not on the loop's clock (now {now}): {now - t:+.3f} s"
 
 
-def check_camera(camera, n_frames=5, timeout_s=10.0, clock=time.monotonic, sleep=time.sleep):
+def check_camera(camera, n_frames=5, timeout_s=10.0, max_yaw_deg=MAX_CAMERA_YAW_DEG, max_offset_m=0.05,
+                 clock=time.monotonic, sleep=time.sleep):
     """Rays and mask shape; n_frames frames: capture times on the clock and strictly increasing, indices
-    increasing, a proper camera pose, a bool mask of the right shape."""
+    increasing, a proper camera pose within the mounting limits of the Camera contract, a C-contiguous bool
+    mask of the right shape.
+    max_yaw_deg: yaw of the optical axis off the base's +x. max_offset_m: horizontal distance of the camera
+    from the base centre; pass half your footprint radius (the default is for a 0.1 m one)."""
     h, w = camera.mask_shape
     for name in ("rays", "rays_low"):
         r = np.asarray(getattr(camera, name))
@@ -54,10 +58,18 @@ def check_camera(camera, n_frames=5, timeout_s=10.0, clock=time.monotonic, sleep
         R = T[:3, :3]
         assert np.allclose(R @ R.T, np.eye(3), atol=1e-6) and np.linalg.det(R) > 0, \
             "Frame.T_base_cam: rotation not orthonormal / right-handed"
+        yaw, offset = camera_mount(T)
+        assert abs(yaw) <= max_yaw_deg, \
+            f"Frame.T_base_cam: the camera looks {yaw:+.0f} deg off the base's forward (+x); more than " \
+            f"{max_yaw_deg:.0f} deg is not supported (the robot drives where the scan says straight ahead)"
+        assert offset <= max_offset_m, \
+            f"Frame.T_base_cam: the camera is {offset:.2f} m from the base centre horizontally (limit " \
+            f"{max_offset_m:.2f} m): the offset is ignored, every range would be off by that much"
         mask = camera.segment(frame)
         assert isinstance(mask, np.ndarray) and mask.dtype == bool and mask.shape == (h, w), \
             f"segment(): {type(mask).__name__} {getattr(mask, 'dtype', '')} {getattr(mask, 'shape', '')}, " \
             f"expected a bool array {(h, w)}"
+        assert mask.flags.c_contiguous, "segment(): the mask must be C-contiguous (np.ascontiguousarray)"
         frames.append(frame)
     ts, idx = [f.t for f in frames], [f.index for f in frames]
     assert all(b > a for a, b in zip(ts, ts[1:])), f"Frame.t not strictly increasing: {ts}"
@@ -66,11 +78,14 @@ def check_camera(camera, n_frames=5, timeout_s=10.0, clock=time.monotonic, sleep
 
 def check_imu(imu, up_c=None, duration_s=0.5, clock=time.monotonic, sleep=time.sleep):
     """Robot standing still for duration_s: samples arrive, each once, times on the clock and strictly
-    increasing, acc ~9.81 m/s^2 (m/s^2, not g) pointing up, gyro ~0 (rad/s, not deg/s).
+    increasing, acc ~9.81 m/s^2 (m/s^2, not g) pointing up, gyro ~0 (rad/s, not deg/s). Every sample is a
+    measurement, from the very first one read() returns: finite, |acc| within 50 % of g (a driver's
+    zero-filled first read is caught here).
     up_c: the expected 'up' in the camera frame (within 15 deg), if known; else only checked to point to the
     upper half of the image (camera y down: acc[1] < 0), which holds for a camera pitched less than 90 deg."""
     assert isinstance(imu.name, str), "Imu.name must be a str"
-    imu.read()  # whatever accumulated before
+    first = imu.read()  # whatever accumulated before: old, but it must be measurements all the same
+    _measurements(first, "the first read()")
     samples, t_end = [], clock() + duration_s
     while clock() < t_end:
         sleep(0.02)
@@ -83,6 +98,7 @@ def check_imu(imu, up_c=None, duration_s=0.5, clock=time.monotonic, sleep=time.s
     assert (np.diff(t) > 0).all(), "IMU sample times not strictly increasing (a sample returned twice?)"
     gyro, acc = np.array([s[1] for s in samples], float), np.array([s[2] for s in samples], float)
     assert gyro.shape == acc.shape == (len(samples), 3), "gyro and acc must be 3-vectors"
+    _measurements(samples, "read()")
     g = float(np.median(np.linalg.norm(acc, axis=1)))
     assert 9.0 < g < 10.6, f"|acc| at rest is {g:.2f}: expected ~9.81 m/s^2 (the specific force, in m/s^2)"
     rate = float(np.median(np.linalg.norm(gyro, axis=1)))
@@ -93,6 +109,18 @@ def check_imu(imu, up_c=None, duration_s=0.5, clock=time.monotonic, sleep=time.s
         assert angle < 15, f"acc at rest is {angle:.0f} deg from the expected 'up' (camera frame, pointing up)"
     else:
         assert up[1] < 0, "acc at rest must point up: negative y in the camera frame (y down)"
+
+
+def _measurements(samples, what):
+    """Every IMU sample is finite, with |acc| within 50 % of g."""
+    for k, (t, gyro, acc) in enumerate(samples):
+        gyro, acc = np.asarray(gyro, float), np.asarray(acc, float)
+        assert math.isfinite(t) and np.isfinite(gyro).all() and np.isfinite(acc).all(), \
+            f"IMU sample {k} of {what} is not finite: t {t}, gyro {gyro}, acc {acc}"
+        norm = float(np.linalg.norm(acc))
+        assert 0.5 * 9.81 < norm < 1.5 * 9.81, \
+            f"IMU sample {k} of {what}: |acc| = {norm:.2f}, not a measurement at rest: expected ~9.81 m/s^2 " \
+            f"(the specific force, in m/s^2; a zero-filled first read?)"
 
 
 def _odometry(base, clock, last=None):
@@ -122,15 +150,21 @@ def _moved(a, b):
     return c * dx + s * dy, -s * dx + c * dy, math.remainder(b.theta - a.theta, 2 * math.pi)
 
 
-def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, start_timeout_s=10.0, inject_fault=None,
+def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, stop_s=0.3, start_timeout_s=10.0, inject_fault=None,
                clock=time.monotonic, sleep=time.sleep):
-    """ROBOT MOTION on a real base (v m/s forward for drive_s, then w rad/s for drive_s; needs free floor).
+    """ROBOT MOTION on a real base (v m/s forward for drive_s, then w rad/s for drive_s, then two short
+    forward drives; needs free floor).
 
     Checks, in order: no DRIVING and no motion before start(); start() reaches DRIVING through STARTING only;
     odometry on the clock; forward command -> x grows by about v * drive_s, measured v > 0; turn command ->
     theta grows (counter-clockwise), measured w > 0; the dead-man: the base stops by itself within deadman_s
-    of the last command; stop() is latched (commands ignored), park() returns True; then, if inject_fault is
-    given (a function that makes the base fail), a new session reports FAULT with a reason."""
+    of the last command, and afterwards either the session goes on (the next command is applied) or the base
+    reports FAULT with a reason (both allowed by the contract); stop() while driving brakes: the measured
+    speed is ~0 within stop_s and v * stop_s (a stop() that only latches leaves the base rolling until its
+    dead-man); stop() is latched (commands ignored), park() returns True; then, if inject_fault is given (a
+    function that makes the base fail), a new session reports FAULT with a reason.
+    stop_s: the time the base needs to stop from v. It must be shorter than the base's dead-man time plus
+    its braking, or a stop() that does not brake passes (the reference robot, 0.63 s of lag: 1.0)."""
     assert isinstance(base.balancing, bool), "Base.balancing must be a bool"
     st = base.status()
     assert st.state in STATES, f"status().state {st.state!r} is not one of {STATES}"
@@ -170,11 +204,32 @@ def check_base(base, v=0.1, w=0.3, drive_s=1.0, deadman_s=1.0, start_timeout_s=1
     o5 = _odometry(base, clock, o4)
     assert abs(_moved(o4, o5)[0]) < 0.005 and abs(o5.v) < 0.02, \
         f"dead-man: the base still moves {deadman_s} s after the last command (v {o5.v:+.3f} m/s)"
+    # after the dead-man: the session goes on, or the base says FAULT (then a new session is started)
+    st = base.status()
+    assert st.state in (DRIVING, FAULT), \
+        f"after the dead-man: state {st.state}, expected DRIVING (the next command resumes) or FAULT"
+    if st.state == FAULT:
+        assert st.fault, "FAULT after the dead-man without a reason (BaseStatus.fault)"
+        base.stop()
+        _start(base, start_timeout_s, clock, sleep)
 
+    # stop() while driving must brake
+    o6 = _odometry(base, clock, _drive(base, v, 0.0, 0.3, clock, sleep))
+    assert o6.v > 0.2 * v, f"command(v={v}) after the dead-man did not move the base (v {o6.v:+.3f} m/s)"
     base.stop()
+    t_stop, o7 = clock(), o6
+    while abs(o7.v) >= 0.02 or abs(o7.w) >= 0.05:
+        assert clock() - t_stop <= stop_s, \
+            f"stop() did not brake: v {o7.v:+.3f} m/s {clock() - t_stop:.2f} s after it (stop_s {stop_s}); " \
+            f"closing the session is not enough, the base must be told to stop"
+        sleep(PERIOD_S / 5)
+        o7 = _odometry(base, clock, o7)
+    assert _moved(o6, o7)[0] <= v * stop_s + 0.01, \
+        f"stop() at {v} m/s: the base rolled {_moved(o6, o7)[0]:.3f} m (more than v * stop_s)"
+
     _drive(base, v, 0.0, 0.3, clock, sleep)
-    o6 = _odometry(base, clock, o5)
-    assert abs(_moved(o5, o6)[0]) < 0.01, "stop() is not latched: a later command() moved the base"
+    o8 = _odometry(base, clock, o7)
+    assert abs(_moved(o7, o8)[0]) < 0.01, "stop() is not latched: a later command() moved the base"
     assert base.status().state != DRIVING, "status() says DRIVING after stop()"
     t_end = clock() + 10.0
     while not base.park():

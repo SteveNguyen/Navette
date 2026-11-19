@@ -13,10 +13,11 @@ Conventions (all of them, everywhere):
   units        m, s, rad, m/s, rad/s, m/s^2.
 
 Threads: the perception thread calls Camera.read / segment, Imu.read and Base.odometry. The command thread
-(20 Hz) calls Base.status, command and park. Base.start and Base.stop come from any thread (page, stop
+(at the config's controller.cmd_hz) calls Base.status, command and park. Base.start and Base.stop come from any thread (page, stop
 button), but the controller serialises start / stop / status / command / park under one lock: a driver only
 has to make odometry() safe against the others.
 """
+import math
 from dataclasses import dataclass, field
 from typing import Callable, NamedTuple, Protocol
 
@@ -50,12 +51,36 @@ class Frame:
     ms: dict = field(default_factory=dict)  # optional per-stage times of read() for the run log, e.g. head, save
 
 
+MAX_CAMERA_YAW_DEG = 10.0  # camera mounting limit (Camera): yaw of the optical axis off the base's +x
+
+
+def camera_mount(T_base_cam):
+    """(yaw of the optical axis off the base's +x, deg; horizontal distance of the camera from the base
+    frame's origin, m) of a Frame.T_base_cam: the two quantities the Camera contract limits."""
+    T = np.asarray(T_base_cam, float)
+    return math.degrees(math.atan2(T[1, 2], T[0, 2])), float(math.hypot(T[0, 3], T[1, 3]))
+
+
 class Camera(Protocol):
     """The camera and whatever turns its picture into a floor mask (a segmentation model, a depth threshold).
 
     The height of the camera is not part of this class: the runtime computes it from T_base_cam, the IMU's
     'up' and the config's camera.body_z (height of the base frame's origin above the floor).
-    Failure: read() and segment() may raise; the loop then ends and the base is stopped."""
+    Failure: read() and segment() may raise; the loop then ends and the base is stopped.
+
+    Mounting (a limit of the navigator today, not of this interface): the navigator's robot frame is the
+    camera's heading frame placed at the base centre. Of T_base_cam it uses the rotation (the camera's
+    heading, for the map) and the height of the translation, nothing else. So:
+      - the optical axis must point along the base's +x to within a few degrees of yaw
+        (MAX_CAMERA_YAW_DEG): the collision monitor takes "straight ahead in the scan" for the direction
+        the base drives in. A camera looking sideways or backwards is NOT supported yet: the robot would
+        drive toward what it does not look at;
+      - the camera must sit close to the vertical through the base centre: its horizontal offset is
+        ignored, so every range is off by up to that offset. It must be small against the footprint radius
+        (the checks take half of it) or covered by the footprint's margin.
+    Pitch and roll are free (they come from the IMU). conformance.check_camera checks both limits; the loop
+    checks them on its first frame and logs a warning when one is exceeded (a warning, not a refusal: a head
+    on a neck sits a few degrees off)."""
 
     rays: np.ndarray       # (h*w, 3) float64 viewing rays of the mask pixel centres, camera frame, row-major, z = 1
     rays_low: np.ndarray   # (h*w, 3) the same through each pixel's lower edge (navette.rays.mask_rays dv=0.5)
@@ -67,7 +92,9 @@ class Camera(Protocol):
         frame (the expensive part belongs in segment())."""
 
     def segment(self, frame: Frame) -> np.ndarray:
-        """Floor mask of a frame from read(): bool (h, w), True = floor the robot may drive on.
+        """Floor mask of a frame from read(): a C-contiguous numpy bool array of shape (h, w) (what
+        np.ascontiguousarray gives), True = floor the robot may drive on. The core reads a mask of another
+        layout correctly, by copying it at every frame: return the plain one.
         Not called for frames the loop does not use (IMU not ready, head moving)."""
 
 
@@ -80,7 +107,9 @@ class Imu(Protocol):
         """Every sample since the last call, oldest first, each once: [(t, gyro, acc)].
         t: sample time, strictly increasing over all calls. gyro: (3,) rad/s. acc: (3,) m/s^2, the specific
         force: at rest it points up with norm ~9.81. Both in the camera frame (the adapter applies the
-        IMU-to-camera rotation). Never blocks; an empty list if nothing new. A source that stops delivering
+        IMU-to-camera rotation). Every sample is a measurement, from the first one returned: all values
+        finite, no zero-filled first read (the adapter drops what its driver returns before the sensor is
+        ready; the runtime ignores non-finite samples, but cannot tell a zero from free fall). Never blocks; an empty list if nothing new. A source that stops delivering
         just returns empty lists: the runtime stops stepping when the newest sample is too old
         (perception.imu_max_age_s), and the stale-perception watchdog then halts the base."""
 
@@ -109,6 +138,9 @@ class Base(Protocol):
     reference robot: 0.5 s), whatever happens to this process or to the link. The controller calls command()
     every control period from start() until stop(), with zeros when it has nothing to say (base starting, no
     navigator output yet), so that the base can tell "hold still" from "the controller is gone".
+    After the dead-man fired during a session, either is allowed: the session goes on and the next command()
+    is applied (the base resumes), or status() reports FAULT with a reason until the next start(). The
+    controller handles both: it halts on a FAULT, and it never stops commanding by itself.
 
     Session: start() opens it, stop() closes it. Outside a session command() must do nothing (latched): a
     STOP from one thread cannot be undone by a command already on its way from another."""
@@ -131,8 +163,9 @@ class Base(Protocol):
         log (a sequence number the base echoes), or None. Raises BaseError if it could not be sent."""
 
     def stop(self) -> None:
-        """Close the session and bring the base to rest now (controlled deceleration). Latched before
-        anything is sent: command() does nothing until the next start(), even if stop() itself raises
+        """Close the session and bring the base to rest now (controlled deceleration): stop() itself must
+        brake. Closing the session alone would leave the base rolling until its dead-man fires. Latched
+        before anything is sent: command() does nothing until the next start(), even if stop() itself raises
         BaseError. Allowed in any state, any number of times."""
 
     def park(self) -> bool:
