@@ -34,7 +34,7 @@ The robot config `robots/reachy_poussah.toml` names four files in its `[adapter]
 
 | Key | File | Where it comes from |
 |---|---|---|
-| `model` | `models/floor.onnx` | the floor segmentation model of the `floor_seg` project, `v7_floor_under` for now: a private development model until the public one is released (access: ask the maintainers), then `hf download SteveNguyen/reachy-mini-floor-seg-dev --include "v7_floor_under/floor.onnx" --local-dir <dir>` |
+| `model` | `models/floor.onnx` | the floor segmentation model of the `floor_seg` project, `v7_floor_under` for now (public development repo): `hf download SteveNguyen/reachy-mini-floor-seg-dev --include "v7_floor_under/floor.onnx" --local-dir <dir>` |
 | `calib` | `calib/calib.json` | camera intrinsics `{"image_resolution", "K", "D"}` of the head camera |
 | `r_cam_imu` | `calib/R_cam_imu.json` | rotation from the head IMU's axes to the camera's |
 | `handeye` | `calib/handeye_X.json` | camera pose in the head frame |
