@@ -24,7 +24,7 @@ fn pose2(p: [f64; 3]) -> Pose2 {
 ///   key_m, key_deg, key_s   a keyframe is taken when the robot moved, turned or waited this much
 #[pyclass(name = "OccupancyGrid", module = "navette")]
 pub struct PyOccupancyGrid {
-    inner: OccupancyGrid,
+    pub(crate) inner: OccupancyGrid,
 }
 
 impl PyOccupancyGrid {
@@ -197,6 +197,20 @@ impl PyOccupancyGrid {
         Ok(self
             .inner
             .update(t, pose2(pose), &scan, sigma, h, max_range, force))
+    }
+
+    /// Replace the whole map (tests, tools): log_odds (n, n) float32, with the corner of cell [0, 0] at
+    /// (x0, y0). The keyframes are forgotten.
+    fn set_map(&mut self, x0: f64, y0: f64, log_odds: PyReadonlyArray2<'_, f32>) -> PyResult<()> {
+        let n = self.inner.n();
+        if log_odds.as_array().dim() != (n, n) {
+            return Err(PyValueError::new_err(format!(
+                "log_odds must have shape ({n}, {n})"
+            )));
+        }
+        let l: Vec<f32> = log_odds.as_array().iter().copied().collect();
+        self.inner.set_map([x0, y0], &l);
+        Ok(())
     }
 
     /// Rebuild the grid from the keyframes (after their poses were corrected).

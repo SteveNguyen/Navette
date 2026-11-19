@@ -190,7 +190,7 @@ impl PyUpFilter {
 /// State: s0 (rad), motion (rad, peak-held acceleration-induced bound), sigma (rad, current bound).
 #[pyclass(name = "TiltTrust", module = "navette")]
 pub struct PyTiltTrust {
-    inner: TiltTrust,
+    pub(crate) inner: TiltTrust,
 }
 
 #[pymethods]

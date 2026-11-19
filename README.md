@@ -34,7 +34,12 @@ Needs a Rust toolchain and [uv](https://docs.astral.sh/uv/). From the repository
 
 ## Bench
 
-    uv run python benches/bench_scan.py
+| Script | Times |
+|--------|-------|
+| `uv run python benches/bench_scan.py` | `FreeSpace.scan` on 320x192 masks |
+| `uv run python benches/bench_occupancy_grid.py` | `OccupancyGrid`: blind_known, update, obstacle_points, replay over a drive through a room |
+| `uv run python benches/bench_collision_monitor.py` | `safe_command` (passing, slowed, blocked requests) and a controller's arc scoring |
+| `uv run python benches/bench_navigator.py` | `Navigator.step` over recorded closed-loop sequences, steps with a plan apart from the others; the frontier planner's parts, on a room and on a 20 x 20 m hall (its worst case) |
 
 ## Licence
 

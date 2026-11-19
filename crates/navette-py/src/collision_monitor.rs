@@ -50,6 +50,20 @@ impl PySafetyParams {
             n_speeds: self.n_speeds,
         }
     }
+
+    pub fn from_core(p: &SafetyParams) -> Self {
+        Self::new(
+            p.radius,
+            p.margin,
+            p.v_max,
+            p.decel,
+            p.latency,
+            p.unseen_m,
+            p.reverse_max,
+            p.step,
+            p.n_speeds,
+        )
+    }
 }
 
 #[pymethods]

@@ -198,6 +198,14 @@ impl OccupancyGrid {
         self.keyframes.clear();
     }
 
+    /// Replace the whole map (tests, tools): `log_odds` row-major, n * n values (panics otherwise), with the
+    /// corner of cell [0, 0] at `origin`. The keyframes are forgotten: they did not build this map.
+    pub fn set_map(&mut self, origin: Point2, log_odds: &[f32]) {
+        self.l.copy_from_slice(log_odds);
+        self.origin = Some(origin);
+        self.keyframes.clear();
+    }
+
     /// Integrate the scan if it is a new keyframe: the first one, or the robot moved, turned or waited
     /// enough since the last one. `force`: always (the frames of a head glance, standing still, see what the
     /// driving frames cannot). Returns true if the scan was integrated.
