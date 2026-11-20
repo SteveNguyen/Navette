@@ -51,7 +51,8 @@ Reachy Mini of the same hardware closely enough to start (same lens, same head).
 part of Navette yet. Only the floor model has to be fetched.
 
 Check `[adapter]` in the config: `base_link` (`"ble"` or `"usb"`), `ble_name` (the base's Bluetooth name, from its
-`[hello] name=`), `usb_port`.
+`[hello] name=`), `usb_port`. A base with another seat height (the reference one is 4 cm): `[camera] body_z` =
+0.177 + seat height (m); every distance the camera measures scales with it.
 
 ## 3. Robot
 

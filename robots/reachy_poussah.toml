@@ -54,8 +54,9 @@ near_n = 3
 # (measured). The camera's height adds the head pose (kinematics) and the hand-eye transform, taken along the
 # IMU's 'up': ~0.27 m at the navigation pose. Checked on the floor (2026-11-20, Mini on the floor, navigation
 # pose): lens centre ~0.215 m by tape, computed 0.220; a door's base at 0.5 / 1.0 / 1.5 m (tape, +-2 cm) projects
-# to 0.50 / 1.02 / 1.50 m. (A hand-eye fit against a floor grid gave 0.215 instead of 0.177: 0.59 / 1.19 / 1.77 m,
-# not used. Runs up to 2026-11-19 used 0.325, a guess: camera ~0.38 m, scan distances ~40% too long.)
+# to 0.50 / 1.02 / 1.50 m; a head sweep (yaw +-30 / 60 / 90 deg) across a corridor 0.98-0.99 m wide (tape) gives
+# 0.98 m. When the base's seat height changes: body_z = 0.177 + seat height. (A hand-eye fit against a floor grid
+# gave 0.215 instead of 0.177: 0.59 / 1.19 / 1.77 m, not used. Runs up to 2026-11-19 used 0.325, a guess: camera ~0.38 m, scan distances ~40% too long.)
 body_z = 0.217
 # Radius around the robot the camera cannot see at its navigation pose (the closest visible floor is at
 # ~0.34 m): the planner's blind disk.
