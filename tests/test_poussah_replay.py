@@ -87,12 +87,13 @@ def ideal_calib(tmp_path):
     return str(p)
 
 
-def replay(tmp_path, navs=None, **kw):
+def replay(tmp_path, navs=None, pose_at_capture=True, **kw):
     """Replay a synthetic run; returns the steps.csv rows. navs: list that receives the navigators made, as
-    (navigator, behaviour, forward_v, odometry)."""
+    (navigator, behaviour, forward_v, odometry). pose_at_capture: the [perception] switch (the robot's: on)."""
     run = tmp_path / "run"
     make_run(run, **kw)
     cfg = config.load(ROBOT_TOML).replace("camera", body_z=0.3)
+    cfg = cfg.replace("perception", pose_at_capture=pose_at_capture)
     calib = ideal_calib(tmp_path)
     robot = recording.open_replay_robot(cfg, str(run), model=all_floor,
                                         calib=(R_CAM_IMU, X, mask_rays(calib), mask_rays(calib, dv=0.5)))
@@ -114,8 +115,10 @@ def test_replay_uses_the_recorded_odometry(tmp_path):
     assert len(rows) == len(FRAMES_T)
     t = FRAMES_T[[int(r["frame"]) for r in rows]]
     x = np.array([float(r["x"]) for r in rows])
-    # the last [nav] at or before each frame (50 Hz lines): V * (t - 9.6) within one line
-    assert x == pytest.approx(V * (t - 9.6), abs=V * 0.021)
+    # the pose at each frame's capture (arrival - 0.038 s): interpolated between the odometry read at the
+    # previous frame's arrival and at this one's; the first frame has only its own read
+    assert x[0] == pytest.approx(V * (t[0] - 9.6), abs=V * 0.021)
+    assert x[1:] == pytest.approx(V * (t[1:] - 0.038 - 9.6), abs=V * 0.021)
     assert all(abs(float(r["y"])) < 1e-3 and abs(float(r["heading_deg"])) < 0.1 for r in rows)
     assert float(rows[0]["cam_h"]) == pytest.approx(0.3 + 0.0512, abs=1e-3)
     assert os.path.exists(tmp_path / "out" / "live.mp4")
@@ -126,6 +129,14 @@ def test_replay_uses_the_recorded_odometry(tmp_path):
     assert [s[6] for s in nav.steps] == pytest.approx([V] * len(rows), abs=1e-3)
     assert [s[0] for s in nav.steps] == pytest.approx(FRAMES_T - 0.038)
     assert [s[1] for s in nav.steps[1:]] == pytest.approx([0.1] * (len(rows) - 1))
+
+
+def test_replay_pose_of_the_frame_s_arrival_without_pose_at_capture(tmp_path):
+    rows = replay(tmp_path, pose_at_capture=False)
+    t = FRAMES_T[[int(r["frame"]) for r in rows]]
+    x = np.array([float(r["x"]) for r in rows])
+    # the last [nav] at or before each frame's arrival (50 Hz lines): V * (t - 9.6) within one line
+    assert x == pytest.approx(V * (t - 9.6), abs=V * 0.021)
 
 
 def test_replay_without_base_keeps_the_pose_fixed(tmp_path):

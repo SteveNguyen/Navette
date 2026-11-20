@@ -47,6 +47,11 @@ up_g_s = 1.0
 # did not reduce the steps without an arc consistently: kept at the core's 10.)
 near_k = 2
 near_n = 3
+# A frame's pose at its capture time (the core's default: the latest odometry when the frame arrives, 38 ms after
+# its capture, adapter.camera_latency_s). Recorded runs, consecutive frames aligned on the floor: the best
+# alignment came with the poses ~40 ms earlier, i.e. at the capture; at the base's turn rate that is ~1 deg of
+# heading on every scan put in the map. Replay of 4 runs: better aligned on 59-70 % of consecutive frame pairs.
+pose_at_capture = true
 
 [camera]
 # Height above the floor of the frame the SDK gives the head pose in, Mini on the base. That frame is the URDF's

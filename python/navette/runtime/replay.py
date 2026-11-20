@@ -73,7 +73,7 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         return make_navigator(behaviour, forward_v, odometry)
 
     up = LiveUp(make_up_filter, cfg.perception.up_g_s, cfg.perception.imu_max_age_s, g=getattr(imu, "g", None))
-    loc = OdometryLocalization()
+    loc = OdometryLocalization(cfg.perception.pose_at_capture)
     nav, run, motion = new_nav(), 0, BaseMotion()
     video, rows, t_first, t_prev, v_prev = _Video(out_dir, video), [], None, None, 0.0
     while True:
@@ -86,7 +86,7 @@ def replay(robot, cfg, run_dir, out_dir, make_navigator, make_up_filter, log=pri
         up.add(imu.read())
         # no base in the recording: the pose stays at the origin
         odom = finite_odometry(base.odometry()) if base is not None else Odometry(t, 0.0, 0.0, 0.0, 0.0, 0.0)
-        loc.update(odom)
+        loc.update(odom, t)
         if follow is not None:  # a robot run: the frames it stepped, its navigator per START, its v_prev
             if idx not in follow:
                 continue

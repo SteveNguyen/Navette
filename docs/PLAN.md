@@ -158,6 +158,13 @@ inputs the prototype handled unsafely, and on purpose:
   On the robot the floor model is bi-stable on a doormat and makes single-frame false patches near an open
   door, which stopped or blocked the robot. Cost: k - 1 frames of delay on a real obstacle filling the image
   bottom (one frame, ~0.12 s, <= 2 cm at 0.15 m/s with 2 of 3), inside the margin.
+- **Pose at the capture time** (`runtime/localization.py`, `OdometryLocalization(at_capture)`,
+  `[perception] pose_at_capture`; false keeps the prototype's pose, the latest odometry when the frame arrives;
+  the reference robot: true). The odometry is read once per frame, at its arrival, one camera latency after the
+  capture (38 ms, `adapter.camera_latency_s`): ~1 deg of heading at the base's turn rate on every scan. The pose
+  is the linear interpolation of the last two reads (receive-stamped) at `Frame.t`, never extrapolated.
+  Measured on recorded runs: consecutive frames align best on the floor with the poses ~40 ms earlier; replay
+  of 4 runs (`tools/flicker/compare_replay.py`, branch `flicker`): better aligned on 59-70 % of frame pairs.
 - **Teleop behaviour** (`navigator.rs`, `Behaviour::Teleop`; new, the prototype had none): the request is the
   operator's (`Navigator::set_request`, the phone page's joystick through the runtime), and goes through the
   collision monitor, the resume gate, the controller's caps and every watchdog like a planner's; (0, 0) once

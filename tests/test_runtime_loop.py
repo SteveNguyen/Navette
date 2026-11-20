@@ -208,6 +208,34 @@ def test_localization_is_the_odometry_pose():
     assert loc.pose() is None
 
 
+def test_localization_at_capture_interpolates_the_last_two_reads():
+    from navette.interfaces import Odometry
+
+    # default: the latest odometry whatever the capture time (the prototype's)
+    loc = OdometryLocalization()
+    loc.update(Odometry(1.0, 0.0, 0.0, 0.0, 0.1, 0.0), 0.9)
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.06)
+    assert loc.pose() == (0.1, 0.0, 0.2)
+    loc = OdometryLocalization(at_capture=True)
+    loc.update(Odometry(1.0, 0.0, 0.0, 0.0, 0.1, 0.0), 0.96)
+    assert loc.pose() == (0.0, 0.0, 0.0)  # one sample: it, whatever the time
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.06)  # captured 40 ms before the read
+    assert loc.pose() == pytest.approx((0.06, 0.0, 0.12))
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.2)  # the same sample read again; capture after it
+    assert loc.pose() == (0.1, 0.0, 0.2)  # not extrapolated
+    # heading across +-pi: the short way round
+    loc.update(Odometry(1.2, 0.1, 0.0, math.pi - 0.1, 0.0, 1.0), 1.2)
+    loc.update(Odometry(1.3, 0.1, 0.0, -math.pi + 0.1, 0.0, 1.0), 1.25)
+    assert math.remainder(loc.pose()[2] - math.pi, math.tau) == pytest.approx(0.0, abs=1e-12)
+    # before the older sample: the older one
+    loc.update(Odometry(1.4, 0.2, 0.0, 0.0, 0.0, 0.0), 1.0)
+    assert loc.pose() == pytest.approx((0.1, 0.0, -math.pi + 0.1))
+    loc.update(None, 1.5)  # no odometry: no pose, and the history is dropped
+    assert loc.pose() is None
+    loc.update(Odometry(2.0, 1.0, 1.0, 1.0, 0.0, 0.0), 1.9)
+    assert loc.pose() == (1.0, 1.0, 1.0)
+
+
 def test_base_motion_low_passes_the_acceleration():
     from navette.interfaces import Odometry
 
