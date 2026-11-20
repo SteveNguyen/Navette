@@ -1,6 +1,7 @@
 # SLAM for Navette: state of the art and proposal
 
-Status: research report (2026-11-20), for a decision. Nothing is built yet. "Measured" numbers are ours (robot
+Status (2026-11-20): approach decided (section 3) and version 1 built on the `slam` branch, offline only (not
+in the robot runtime); see "Status and roadmap" at the end. "Measured" numbers are ours (robot
 runs); "[src]" items are from the cited sources; the rest is inference, marked as such where it matters.
 
 ## 1. Problem and constraints
@@ -127,3 +128,35 @@ initialisation (arXiv 2406.05969); XFeat (arXiv 2404.19174); iBoW-LCD (arXiv 180
 1802.09261); Grisetti et al. graph-SLAM tutorial (2010); Konolige et al. SPA (IROS 2010); Agarwal et al. DCS
 (ICRA 2013); Sünderhauf switchable constraints (IROS 2012); Kümmerle et al. SLAM accuracy (AuRo 2009); evo
 (github.com/MichaelGrupp/evo).
+
+## Status and roadmap
+
+Decisions (2026-11-20): the proposal of section 3; offline first; version 1 = drift correction within one run.
+
+Built (version 1, offline):
+- core `slam::scan_matcher`: correlative matcher (Olson 2009), two-level search with an exact best, covariance
+  from the score distribution; ~3 ms for 500 points in a +-0.5 m, +-20 deg window (laptop);
+- core `slam::pose_graph`: SE(2) Levenberg-Marquardt, block sparse Cholesky on a minimum-degree order, Dynamic
+  Covariance Scaling on loop edges (phi ~10: phi = 1 drops true loops once drift is a few sigma); 1000 nodes and
+  100 loops in ~4 ms;
+- `navette.slam`: front end (submap per turn in place of >= 180 deg, or per metre driven; matches gated by the
+  accumulated odometry uncertainty; robust loop edges), offline runner, metrics, a simulated two-room loop with
+  ground truth and odometry drift, extraction of sequences from recorded runs.
+
+Results: simulation (10 seeds): end error 0.40 -> 0.02 m (one loop, 11.6 m) and 0.78 -> 0.02 m (two loops),
+no false loop closure. Recorded runs (9-17 m): almost no correction, for three reasons: little drift to correct
+(the base gyro heading), the explorer never turns a full circle in place (its looks span 60-260 deg), and the
+match score counted the parts of a view the reference never saw.
+
+Roadmap:
+1. Explorer: an occasional full 360 deg look (behind a parameter, on in the robot config). In progress.
+2. Matcher: score only what the reference has observed. In progress.
+3. Ground truth on the robot: AprilTags lying on the floor at tape-measured positions, one longer multi-room run
+   (needs the floor model to cross doorsteps); calibrate the odometry noise model; measure SLAM vs odometry.
+4. Map save / load and relocalisation: save the submaps with their corrected poses; at start or when lost, a
+   full look matched against the whole map (coarse-to-fine search over all positions and headings), accepted
+   only when clearly better than the second-best candidate (similar rooms, symmetric corridors).
+5. Runtime integration behind a config flag (default off): the front end fed by the loop, `map -> odom` into
+   `runtime/localization.py`, grid `replay()` on corrections; CPU measured on the CM4.
+Later, optional: corridor constraints (use a match's well-constrained directions only), marginal covariances
+from the pose graph for the search windows, visual corrections.
