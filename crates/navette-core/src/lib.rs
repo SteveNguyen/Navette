@@ -11,5 +11,6 @@ pub mod navigator;
 pub mod occupancy_grid;
 pub mod params;
 pub mod scan;
+pub mod slam;
 pub mod state_estimation;
 pub mod velocity_smoother;

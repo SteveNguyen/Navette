@@ -19,7 +19,9 @@ mod exploration;
 mod geometry;
 mod navigator;
 mod occupancy_grid;
+mod pose_graph;
 mod scan;
+mod scan_matcher;
 mod state_estimation;
 mod velocity_smoother;
 
@@ -34,5 +36,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     exploration::register(m)?;
     controller::register(m)?;
     navigator::register(m)?;
+    pose_graph::register(m)?;
+    scan_matcher::register(m)?;
     Ok(())
 }
