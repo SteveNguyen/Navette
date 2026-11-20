@@ -49,13 +49,15 @@ near_k = 2
 near_n = 3
 
 [camera]
-# Height of the Mini's body frame origin above the floor when on the base: 0.215 with the Mini standing on the
-# floor (hand-eye fit, 214-216 mm) + 0.04 (the base's seat, measured). The camera's height adds the head pose
-# (kinematics) and the hand-eye transform, taken along the IMU's 'up': ~0.31 m at the navigation pose. (Runs up
-# to 2026-11-19 used 0.325, a guess: camera ~0.38 m, every scan distance ~22% too long.)
-body_z = 0.255
+# Height above the floor of the frame the SDK gives the head pose in, Mini on the base. That frame is the URDF's
+# root frame (bottom of the Mini's foot) raised by the SDK's head_z_offset, 0.177 m; plus 0.04 m, the base's seat
+# (measured). The camera's height adds the head pose (kinematics) and the hand-eye transform, taken along the
+# IMU's 'up': ~0.27 m at the navigation pose. Checked with a tape, Mini on the floor at the navigation pose: lens
+# centre ~0.215 m, computed 0.220. (A hand-eye fit against a floor grid gave 0.215 instead of 0.177, ~4 cm off:
+# not used. Runs up to 2026-11-19 used 0.325, a guess: camera ~0.38 m, scan distances ~40% too long.)
+body_z = 0.217
 # Radius around the robot the camera cannot see at its navigation pose (the closest visible floor is at
-# ~0.38 m): the planner's blind disk.
+# ~0.34 m): the planner's blind disk.
 blind_m = 0.5
 
 [explore]
