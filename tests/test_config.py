@@ -27,7 +27,7 @@ def test_reachy_poussah_values():
     assert (cfg.behaviour.default, cfg.behaviour.forward_v) == ("explore", 0.15)
     # restart hysteresis: stop-and-go bursts overshoot on the balancing base
     assert (cfg.behaviour.resume_n, cfg.behaviour.resume_margin) == (4, 0.10)
-    assert cfg.camera.body_z == 0.325 and cfg.camera.blind_m == 0.5
+    assert cfg.camera.body_z == 0.255 and cfg.camera.blind_m == 0.5
     assert cfg.explore.v_set == (0.1, 0.2, 0.3)
     # the exploration fixes measured on the robot's runs, on (the core's defaults are off)
     assert cfg.explore.near_known is True
@@ -110,7 +110,7 @@ def edited(tmp_path, old, new, count=1):
     (r"^radius = 0.13 ", "radius = -0.13 ", r"\[footprint\] radius"),
     (r"^margin = 0.05$", "margin = inf", r"\[footprint\] margin = inf"),
     (r"^stale_s = 0.9$", "stale_s = 0", r"\[perception\] stale_s"),
-    (r"^body_z = 0.325$", "body_z = 0.0", r"\[camera\] body_z"),
+    (r"^body_z = 0.255$", "body_z = 0.0", r"\[camera\] body_z"),
     (r"^cmd_hz = 20.0 ", "cmd_hz = 0.0 ", r"\[controller\] cmd_hz"),
     (r"^v_max = 0.15 ", "v_max = -0.15 ", r"\[controller\] v_max"),
     (r"^port = 8090$", "port = 0", r"\[page\] port"),

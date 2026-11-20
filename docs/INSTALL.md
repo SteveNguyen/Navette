@@ -118,7 +118,7 @@ PYTHONPATH=~/navette/pylib /venvs/apps_venv/bin/python -m navette.runtime \
   START, STOP; pushing an antenna is also a STOP.
 - **What exploration looks like**: after START the base stands up (it lurches back, then sways forward, ~±14 cm)
   and settles ~2 s; then it explores at up to 0.15 m/s. It often turns on the spot: the camera sees only ~70 deg
-  ahead and nothing closer than ~0.47 m, so it turns to look before it drives. It stops close to obstacles and
+  ahead and nothing closer than ~0.4 m, so it turns to look before it drives. It stops close to obstacles and
   turns away; it never reverses. When nothing is left to explore it turns once all round, then stops by itself
   ("exploration finished") and sits down. The phone page shows the camera with the floor in green and the map.
 - **Known limits** (floor model): doorsteps, thresholds and some doormats read as obstacles (the robot may not
