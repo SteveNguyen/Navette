@@ -50,6 +50,9 @@ CTRL_BIT = {"usb": F_CTRL_USB, "ble": F_CTRL_BLE}
 
 NH, NS, NZ = "nh", "ns", "nz"  # hello, halt (decel ramp to 0, keeps balancing), zero pl/pr
 STAND, SIT = "S0", "S1"        # legacy Commander lines
+# Disarm: the motor power stages off, as the base's power button does (ns only ramps the nv reference, S1 on a
+# Stopped base does nothing to the motors). The one host command that is sure to cut the motors.
+DISARM = "E1"
 NAV_RATES = (0, 10, 25, 50, 100)
 # balance gains A-D, balance angle O, margin M, tilt filter UF, wheel speed loop pv / pmVP / pmVF / pmVI, release
 # pf / pb (HOVERBOARD.md of the firmware)
@@ -425,6 +428,10 @@ class BaseLink:
     def sit(self):
         self._write(SIT)
 
+    def disarm(self):
+        """E1: motor power stages off (safety cut). Not subject to the halt latch."""
+        self._write(DISARM)
+
     # --- state
     def latest(self):
         """(last Nav or None, pose (x, y, theta) or None before a [hello] gave r and track)."""
@@ -468,7 +475,9 @@ class BaseLink:
 
 # ------------------------------------------------------------------ logging and dry run
 
-DRY_OK = ("nh", "nr", "nq", "nb")  # the only lines a dry run sends: read-only (hello, rate, clock, interval)
+# the only lines a dry run sends: read-only (hello, rate, clock, interval), and the safety cut, which can only
+# stop the motors
+DRY_OK = ("nh", "nr", "nq", "nb", DISARM)
 
 
 class LoggedTransport:

@@ -17,8 +17,8 @@ HELLO = f"[hello] proto=1 setup=7 fw=abc name=rmini_wheels_6 r={R} track={TRACK}
 START_TIMEOUT_S = 10.0
 
 
-def nav_line(st=2, vc=0.0, wc=0.0, cs=0, seq=1, wl=0.0, wr=0.0, f=7, pl=0.0, pr=0.0):
-    return (f"[nav] t=1000 seq={seq} st={st} tilt=0.0 rate=0.0 roll=0.0 wl={wl} wr={wr} pl={pl} pr={pr} ax=0.0 "
+def nav_line(st=2, vc=0.0, wc=0.0, cs=0, seq=1, wl=0.0, wr=0.0, f=7, pl=0.0, pr=0.0, tilt=0.0):
+    return (f"[nav] t=1000 seq={seq} st={st} tilt={tilt} rate=0.0 roll=0.0 wl={wl} wr={wr} pl={pl} pr={pr} ax=0.0 "
             f"az=9.81 vc={vc} wc={wc} cs={cs} f={f}")
 
 
@@ -73,15 +73,15 @@ class Rig:
     def feed(self, line):
         self.tr.on_line(self.clock.t, line)  # as the transport thread: through LoggedTransport if wrapped
 
-    def nav(self, st=2, vc=0.0, wc=0.0, wl=0.0, wr=0.0):
+    def nav(self, st=2, vc=0.0, wc=0.0, wl=0.0, wr=0.0, tilt=0.0):
         self.seq += 1
-        self.feed(nav_line(st, vc, wc, seq=self.seq, wl=wl, wr=wr, f=self.f))
+        self.feed(nav_line(st, vc, wc, seq=self.seq, wl=wl, wr=wr, f=self.f, tilt=tilt))
 
-    def step(self, dt=0.05, st=2, vc=0.0, wc=0.0, nav_out=None, wl=0.0, wr=0.0):
+    def step(self, dt=0.05, st=2, vc=0.0, wc=0.0, nav_out=None, wl=0.0, wr=0.0, tilt=0.0):
         """dt later: a fresh [nav] (unless st is None), the perception output (if any), one tick."""
         self.clock.t += dt
         if st is not None and self.link is not None:
-            self.nav(st, vc, wc, wl, wr)
+            self.nav(st, vc, wc, wl, wr, tilt)
         if nav_out is not None:
             self.ctrl.set_nav(nav_out, self.clock.t, self.ctrl.run)
         self.ctrl.tick()
@@ -745,3 +745,90 @@ def test_poussah_base_passes_the_static_conformance_checks():
     r = Rig()
     assert r.base.status().state == itf.STOPPED
     assert r.base.command(0.1, 0.0) is None and r.sent() == []
+
+
+# --- safety cut (E1) and the START rest check. 2026-11-20: after its forward cut-off the base reported Stopped
+# with its motors on and drove both wheels at 35-44 rad/s for 16 s (robot on its front); ns / S1 did nothing.
+
+MOTORS_ON = 7  # f: IMU ok, tilt trusted, motors on
+
+
+def test_tipped_event_cuts_the_motors_during_a_session():
+    r = Rig(st=0)
+    r.step(st=0)
+    assert r.ctrl.start()[0]
+    r.feed("[event] t=3 ev=tipped st=2")
+    r.step(st=0, wl=-35.0, wr=-44.0)
+    assert bl.DISARM in r.sent() and r.ctrl.state == lr.IDLE
+
+
+def test_stopped_base_with_spinning_wheels_is_cut_out_of_a_session():
+    """No session (the controller is idle): the cut still applies, once the spin has lasted RUNAWAY_S."""
+    r = Rig(st=0, f=MOTORS_ON)
+    r.step(st=0, wl=-35.0, wr=-44.0)
+    assert bl.DISARM not in r.sent()  # a single line: not yet
+    for _ in range(int(pb.RUNAWAY_S / 0.05) + 1):
+        r.step(st=0, wl=-35.0, wr=-44.0)
+    assert r.sent().count(bl.DISARM) == 1
+    r.step(st=0, wl=-35.0, wr=-44.0)
+    assert r.sent().count(bl.DISARM) == 1  # not every tick
+    r.step(dt=pb.DISARM_REPEAT_S, st=0, wl=-35.0, wr=-44.0)
+    assert r.sent().count(bl.DISARM) == 2  # still spinning: again
+
+
+@pytest.mark.parametrize("f, wl, n", [
+    (MOTORS_ON, 4.0, 20),        # slower than RUNAWAY_RAD_S
+    (MOTORS_ON & ~bl.F_MOTORS_ON, 40.0, 20),  # motors off: wheels turned by hand / coasting
+    (MOTORS_ON, 40.0, 3),        # a spike shorter than RUNAWAY_S
+])
+def test_no_cut_without_a_lasting_runaway(f, wl, n):
+    r = Rig(st=0, f=f)
+    for _ in range(n):
+        r.step(st=0, wl=wl, wr=wl)
+    r.step(st=0)
+    assert bl.DISARM not in r.sent()
+
+
+def test_no_cut_while_balancing():
+    """Balancing wheels may spin fast: only a Stopped base with its motors on is a runaway."""
+    r = Rig(st=2)
+    for _ in range(20):
+        r.step(st=2, wl=-20.0, wr=-20.0)
+    assert bl.DISARM not in r.sent()
+
+
+def test_the_cut_goes_out_in_a_dry_run(tmp_path):
+    """E1 can only stop the motors: the dry run's transport lets it through."""
+    r = Rig(st=0, dry_run=True, tmp_path=tmp_path)
+    r.feed("[event] t=3 ev=tipped st=0")
+    r.step(st=0)
+    assert bl.DISARM in r.tr.sent
+
+
+HELLO_BACK = HELLO + " back=15.92 front=-15.92"
+
+
+@pytest.mark.parametrize("tilt, wl, why", [
+    (-90.0, 0.0, "not on its back rest"),   # on its front (the ready bit was seen set there)
+    (5.0, 0.0, "not on its back rest"),
+    (17.5, 0.0, "not on its back rest"),    # past back + 1
+    (14.0, 2.0, "wheels are turning"),
+])
+def test_start_refused_unless_still_on_the_back_rest(tilt, wl, why):
+    r = Rig(st=0, hello=HELLO_BACK)
+    r.step(st=0, tilt=tilt, wl=wl, wr=wl)
+    ok, msg = r.ctrl.start()
+    assert not ok and why in msg and r.sent() == []
+
+
+def test_start_from_the_back_rest_stands_up():
+    r = Rig(st=0, hello=HELLO_BACK)
+    r.step(st=0, tilt=14.2)
+    assert r.ctrl.start()[0] and r.sent() == ["nv0,0,1", "S0"]
+
+
+def test_start_from_a_disarmed_base_is_allowed():
+    """After E1 (f bit 4 clear) S0 re-arms the motors: not a reason to refuse."""
+    r = Rig(st=0, hello=HELLO_BACK, f=MOTORS_ON & ~bl.F_MOTORS_ON)
+    r.step(st=0, tilt=14.2)
+    assert r.ctrl.start()[0]

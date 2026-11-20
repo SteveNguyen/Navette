@@ -3,7 +3,11 @@
 What the contract's calls mean on this base (firmware docs/nav-link-api.md, sections 4 and 5):
 
   start()    refused unless a [nav] was received, the base is not in its Stopping state, and (except in a dry
-             run) [hello] says protocol 1 and setup=7 (calibrated). Then: open the link's latch, claim control
+             run) [hello] says protocol 1 and setup=7 (calibrated). From Stopped, also refused unless the wheels
+             are still (REST_WHEEL_RAD_S) and, if [hello] gives the back fall limit (`back`), the base is on
+             its back rest (tilt between REST_MIN_DEG and back + REST_ABOVE_DEG): the firmware's ready-to-stand
+             bit was seen set with the base on its front and its wheels spinning (2026-11-20). A base disarmed
+             by E1 (f bit 4 clear) is not refused: S0 re-arms it. Then: open the link's latch, claim control
              with nv0,0 (any nv from a link, while the base has no controller, makes that link its controller;
              allowed while sitting; S0 from a non-controller link is refused), and S0 (stand up) if the base
              sits. Events from before are history.
@@ -25,6 +29,11 @@ What the contract's calls mean on this base (firmware docs/nav-link-api.md, sect
              STARTING until the first Balancing [nav] (after a stand-up: until its settle roll is over, see
              SETTLE_MIN_S), then DRIVING.
              Also the periodic tick: one clock-sync round trip (nq) per SYNC_S.
+             Also the safety cut, in or out of a session: E1 (motor power stages off) on a `tipped` event, or
+             when the base says Stopped with its motors on while a wheel spins past RUNAWAY_RAD_S for
+             RUNAWAY_S. Measured 2026-11-20: after its forward cut-off the base reported Stopped, motors on,
+             and drove both wheels at a steady 35-44 rad/s for 16 s with the robot on its front; ns and S1
+             did nothing, only the power button (= E1) stopped them (a firmware bug, fixed there too).
   odometry() pose from the wheel angles and the base's gyro (poussah_link.Odometry); v from the wheel speeds,
              w from the gyro (gz) once its offset is known, else from the wheel speeds.
 
@@ -54,6 +63,13 @@ SIT_SETTLE_S = 1.0  # after the base's own sit-down, time on its rest before a n
 SETTING_GAP_S = 0.03  # between two setting lines before a stand-up
 WHEEL_R_DEFAULT = 0.0444  # m, the firmware's default wheel radius, if no [hello] gave r
 SYNC_S = 1.0            # BaseLink.sync() period
+RUNAWAY_RAD_S = 5.0     # a wheel faster than this while the base says Stopped with its motors on: runaway
+RUNAWAY_S = 0.25        # ... for this long (two [nav] lines at 10 Hz), then E1
+DISARM_REPEAT_S = 1.0   # E1 again if the runaway goes on (a lost line)
+REST_WHEEL_RAD_S = 0.5  # START from Stopped: both wheels slower than this
+# START from Stopped: on its back rest, tilt in [REST_MIN_DEG, back + REST_ABOVE_DEG]. [hello] back is the back
+# fall limit, not the rest (no rest value on the link: ~14 deg with the Mini, other loads differ; firmware notes).
+REST_MIN_DEG, REST_ABOVE_DEG = 10.0, 1.0
 
 
 def wheels_still(nav, r):
@@ -93,6 +109,8 @@ class PoussahBase:
         self._sitting_down = False
         self._sat_at = None  # first Stopped [nav] seen by start() after such a stop
         self._next_sync = clock()
+        self._spin_since = None  # first [nav] of the current Stopped-motors-on-wheels-spinning stretch
+        self._disarmed_at = None  # last E1 sent
 
     # --- contract
     def odometry(self):
@@ -110,8 +128,9 @@ class PoussahBase:
         return Odometry(nav.t_recv, pose[0], pose[1], pose[2], v, w)
 
     def start(self):
-        self._drain_events()  # events from before START are history (logged), except a stop procedure
+        # events from before START are history (logged), except a stop procedure, and the safety cut sees them
         nav = self.link.latest()[0]
+        self._guard(nav, self._drain_events())
         if nav is None:
             raise StartRefused("no [nav] from the base")
         self._ready_bit_seen |= bool(nav.f & pl.F_READY_TO_STAND)
@@ -135,6 +154,8 @@ class PoussahBase:
             ok, why = self.link.hello_ok()
             if not ok:
                 raise StartRefused(why)
+            if nav.st == pl.STOPPED:
+                self._check_on_rest(nav)
         self._session, self._ready, self._fault, self._stood = True, False, None, False
         self._balancing_since = None
         self.link.resume()
@@ -179,6 +200,7 @@ class PoussahBase:
         if nav is not None:
             self._ready_bit_seen |= bool(nav.f & pl.F_READY_TO_STAND)
         events = self._drain_events()
+        self._guard(nav, events)  # in or out of a session
         low = bool(nav is not None and nav.f & pl.F_LOW_BATTERY)
         silent = nav is None or now - nav.t_recv > NAV_STALE_S
         if not self._session:
@@ -190,6 +212,38 @@ class PoussahBase:
         return BaseStatus(DRIVING if self._ready else STARTING, "", low)
 
     # --- helpers
+    def _check_on_rest(self, nav):
+        """Raise StartRefused unless the sitting base is still and on its back rest (see start in the module
+        doc)."""
+        if max(abs(nav.wl), abs(nav.wr)) >= REST_WHEEL_RAD_S:
+            raise StartRefused(f"the wheels are turning ({nav.wl:+.1f} / {nav.wr:+.1f} rad/s): the base must sit "
+                               "still on its rest")
+        back = self.link.hello.kv.get("back") if self.link.hello is not None else None
+        if isinstance(back, (int, float)) and not REST_MIN_DEG <= nav.tilt <= back + REST_ABOVE_DEG:
+            raise StartRefused(f"the base is not on its back rest (tilt {nav.tilt:+.1f} deg, expected "
+                               f"{REST_MIN_DEG:.0f} to {back + REST_ABOVE_DEG:.0f}): sit it on its rest")
+
+    def _guard(self, nav, events):
+        """The safety cut (module doc, status): E1 on a `tipped` event, or on a Stopped base whose motors are
+        on while a wheel spins past RUNAWAY_RAD_S for RUNAWAY_S; again every DISARM_REPEAT_S while it lasts."""
+        now = self.clock()
+        tipped = any(e.ev == "tipped" for e in events)
+        spinning = (nav is not None and nav.st == pl.STOPPED and bool(nav.f & pl.F_MOTORS_ON)
+                    and max(abs(nav.wl), abs(nav.wr)) > RUNAWAY_RAD_S)
+        if not spinning:
+            self._spin_since = None
+        elif self._spin_since is None:
+            self._spin_since = nav.t_recv
+        runaway = spinning and nav.t_recv - self._spin_since >= RUNAWAY_S
+        if not (tipped or runaway):
+            return
+        if self._disarmed_at is not None and now - self._disarmed_at < DISARM_REPEAT_S and not tipped:
+            return
+        self._disarmed_at = now
+        why = "tipped" if tipped else f"Stopped with the motors on and the wheels at {nav.wl:+.1f} / {nav.wr:+.1f} rad/s"
+        self.log(f"base: SAFETY CUT (E1, motors off): {why}")
+        self.link.disarm()
+
     def _judge(self, nav, events, silent):
         """The reason this session must end, or None. Also notes that Balancing was reached."""
         for e in events:
