@@ -136,7 +136,9 @@ class ReplayBase:
         from navette.robots.reachy_poussah.poussah_base import PoussahBase
 
         with open(os.path.join(run_dir, "base.jsonl")) as f:
-            self.rx = [(r["t"], r["rx"]) for r in map(json.loads, f) if "rx" in r]  # only what was received
+            # a power cut mid-write leaves a tail of NUL bytes (seen on a real run): such lines are skipped
+            lines = [ln for ln in f if ln.strip("\x00 \n")]
+            self.rx = [(r["t"], r["rx"]) for r in map(json.loads, lines) if "rx" in r]  # only what was received
         self.link, self.now, self.i = pl.BaseLink(pl.NoTransport()), now, 0
         self.base = PoussahBase(self.link, log=lambda m: None)
 

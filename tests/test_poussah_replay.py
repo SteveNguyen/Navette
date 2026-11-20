@@ -26,12 +26,13 @@ R_CAM_IMU = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0.0]])  # IMU z (up) -> came
 FRAMES_T = 10.0 + 0.1 * np.arange(10)
 
 
-def make_run(d, base=True, fifo=False, fallback_t=None, steps=None, args=None):
+def make_run(d, base=True, fifo=False, fallback_t=None, steps=None, args=None, power_cut=False):
     """A recording in the robot run format: 10 frames at 10 Hz from t = 10 s, still IMU, head pose identity;
     base.jsonl: the base driving forward at V from t = 9.6 s (wheel angles as the firmware signs them).
     fallback_t: the robot switched to the daemon IMU then (meta imu_fallback_t); state.jsonl then holds a daemon
     IMU tilted by 10 deg (camera looking up), so the switch shows in the pitch. steps: robot steps.csv rows
-    {frame: (run, v_prev)} or {frame: (run, v_prev, state)}. args: meta.json "args"."""
+    {frame: (run, v_prev)} or {frame: (run, v_prev, state)}. args: meta.json "args". power_cut: base.jsonl ends
+    with a line of NUL bytes, as a power cut mid-write leaves it."""
     os.makedirs(d / "frames")
     meta = {"robot": {"imu_fallback_t": fallback_t}}
     if args is not None:
@@ -73,6 +74,8 @@ def make_run(d, base=True, fifo=False, fallback_t=None, steps=None, args=None):
                 line = (f"[nav] t={int(t * 1e6)} seq={k} st=2 tilt=0 rate=0 roll=0 wl={wl:.3f} wr={wl:.3f} "
                         f"pl={p:.4f} pr={p:.4f} ax=0 az=9.81 vc={V} wc=0 cs=0 f=7")
                 f.write(json.dumps({"t": round(float(t), 4), "rx": line}) + "\n")
+            if power_cut:
+                f.write("\x00" * 300)
 
 
 def all_floor(bgr):
@@ -137,6 +140,12 @@ def test_replay_pose_of_the_frame_s_arrival_without_pose_at_capture(tmp_path):
     x = np.array([float(r["x"]) for r in rows])
     # the last [nav] at or before each frame's arrival (50 Hz lines): V * (t - 9.6) within one line
     assert x == pytest.approx(V * (t - 9.6), abs=V * 0.021)
+
+
+def test_replay_of_a_run_cut_by_a_power_loss(tmp_path):
+    rows = replay(tmp_path, pose_at_capture=False, power_cut=True)
+    t = FRAMES_T[[int(r["frame"]) for r in rows]]
+    assert np.array([float(r["x"]) for r in rows]) == pytest.approx(V * (t - 9.6), abs=V * 0.021)
 
 
 def test_replay_without_base_keeps_the_pose_fixed(tmp_path):
