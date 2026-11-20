@@ -87,6 +87,7 @@ class Controller:
                 if self.base is not None:
                     self.base.start()
             except itf.StartRefused as e:  # nothing was sent: stay as we are
+                self.log(f"START refused: {e}")
                 return False, str(e)
             except itf.BaseError as e:
                 self.run += 1  # whatever was under way is over
