@@ -162,8 +162,12 @@ under_thr = 0.5          # 'under' cutoff (3-channel model): floor with somethin
 model_threads = 2        # CM4: 1 -> 86 ms, 2 -> 60, 3 -> 56, 4 -> 62; 2 leaves cores to the rest
 camera_latency_s = 0.038 # the frames lag the IMU by this much
 nav_pitch_deg = 15.0     # head pitch (down) while navigating
-# Head pitch of a glance at the ground just ahead; 0 = no glance. Keep 0: a 35 deg head move shifted the
-# centre of mass of the balancing base and its firmware cut the motors (runaway: both wheels past 16 rad/s).
+# Head pitch of a glance at the ground just ahead; 0 = no glance. Keep 0: a 35 deg head move in 0.5 s shifted
+# the centre of mass of the balancing base and its firmware cut the motors (runaway: both wheels past 16 rad/s).
+# 2026-11-20 (firmware 09b917e, standing at zero velocity): 25 deg in 2 s and 30 deg in 3 s were stable, but
+# the base rolled 5.3 / 7.5 cm FORWARD to catch the head's weight (then back): the travel grows with the angle,
+# not with the move's speed. A glance gains ~10-14 cm of seen floor ahead (closest seen ~0.34 m at 15 deg,
+# ~0.24 / ~0.20 m at 25 / 30, estimated) but rolls toward what it checks: needs that room kept first.
 glance_pitch_deg = 0.0
 daemon_python = "/venvs/mini_daemon/bin/python"  # runs the 400 Hz IMU reader (needs smbus3)
 base_link = "ble"        # "ble" or "usb"

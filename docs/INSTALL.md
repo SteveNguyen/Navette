@@ -7,8 +7,9 @@ cross-built on the laptop and copied over. Nothing here touches the robot's own 
 Reference setup: Reachy Mini (Wireless) on the Poussah base. Commands assume the robot answers as
 `reachy-mini.local` and its user is `pollen`.
 
-**Base firmware**: `hoverboard-nav` branch of `pollen-robotics/firmware_poussah`, commit 8c704f1 or later (it loads
-its Mini settings from its seat switch, gives the gyro heading and the ready-to-stand flag). Build and flash over
+**Base firmware**: `hoverboard-nav` branch of `pollen-robotics/firmware_poussah`, commit 09b917e or later (it loads
+its Mini settings from its seat switch, gives the gyro heading and the ready-to-stand flag, and since 09b917e
+really cuts the motors when it sits after a fall: older builds could keep driving the wheels). Build and flash over
 USB from that repository (see its `HOVERBOARD.md`): `pio run -e hoverboard`, then `tools/flash.sh` (keeps the
 base's own calibration). The base must also be calibrated (`[hello] setup=7`): see `HOVERBOARD.md`, "Per-base
 setup". Older firmware works only with the settings line in the config (`[adapter] stand_settings`, the comment
