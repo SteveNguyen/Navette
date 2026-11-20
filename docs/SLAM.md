@@ -151,7 +151,13 @@ match score counted the parts of a view the reference never saw.
 Roadmap:
 1. Explorer: an occasional full 360 deg look (`[explore] look360_m`, 0 = off in the core; the robot config: a
    380 deg turn in place every 2.5 m driven). Done; to check on the robot that its submaps match.
-2. Matcher: score only what the reference has observed. In progress.
+2. Matcher: score only what the reference has observed. Done: an optional observed layer in the likelihood
+   grid (the reference submaps' free and obstacle cells); the score is the mean over the query points in
+   observed cells, floored at the count observed at the odometry guess (a plain mean over a subset rewards
+   poses that move misfits out of the observed area: with a fixed floor, 9-18 false loops in simulation);
+   the two-level search stays exact. Simulation (10 seeds, 1 / 2 loops): accepted loops 10 -> 14 / 61 -> 70,
+   no false loop; recorded runs: views that line up score 0.6-0.7 instead of 0.4-0.5, but no more matches
+   accepted (the others are ill-conditioned, or overlap the reference by under half).
 3. Ground truth on the robot: AprilTags lying on the floor at tape-measured positions, one longer multi-room run
    (needs the floor model to cross doorsteps); calibrate the odometry noise model; measure SLAM vs odometry.
 4. Map save / load and relocalisation: save the submaps with their corrected poses; at start or when lost, a

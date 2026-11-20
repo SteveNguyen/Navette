@@ -89,6 +89,23 @@ def test_loop_closure_beats_odometry_without_false_match(seed):
     assert same_poses([metrics.compose(T, seq.odom[-1])], [fe.pose()])
 
 
+def test_partial_overlap_is_accepted_with_the_observed_score_only():
+    """Seed 6: the spin of submap 15 matched against submaps 8-12 (an earlier pass nearby) sees much that they
+    never observed. Scored over the observed points only, it is accepted, and right; scored over all its points
+    (the plain score), it is rejected on its score, even at the plain score's former threshold of 0.5."""
+    seq = scenario(6)
+    fe = run(seq)
+    m = next(m for m in fe.matches if m.query == 15 and m.ref == list(range(8, 13)))
+    assert m.edge is not None and m.reason == "ok", m.reason
+    assert m.n_obs < 0.8 * m.n and m.score > 0.65
+    gt = metrics.anchor(seq.gt, seq.odom)
+    e = metrics.relative(metrics.relative(gt[fe.submaps[m.base].first], gt[fe.submaps[m.query].first]), np.array(m.z))
+    assert math.hypot(e[0], e[1]) < FALSE_M and abs(math.degrees(e[2])) < FALSE_DEG
+    plain = run(seq, SlamParams(observed_score=False, min_score=0.5))
+    mp = next(x for x in plain.matches if x.query == 15 and x.ref == m.ref)
+    assert mp.edge is None and mp.reason.startswith("score") and mp.n_obs == mp.n
+
+
 def test_no_loops_is_odometry():
     seq = scenario(0)
     fe = run(seq, loops=False)

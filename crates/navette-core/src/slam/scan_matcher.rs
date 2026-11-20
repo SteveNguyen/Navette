@@ -22,6 +22,31 @@
 //! below best - margin: the best is exact (as a full search), and every candidate within `margin` of it has
 //! been evaluated, which is what the covariance needs.
 //!
+//! Observed layer ([`LikelihoodGrid::new_with_observed`], optional): the cells the reference has observed (free
+//! or occupied). A query point outside them says nothing about the alignment (the reference never looked
+//! there), but the plain score counts it as a miss: a new view that only half overlaps the reference scores
+//! ~0.5 even when perfectly aligned, i.e. the plain score measures overlap, not alignment (measured on robot
+//! runs: 0.19-0.49 for views that line up where they overlap). With the layer, a candidate's score is
+//! sum(v over the query points in observed cells) / max(their number, k), k = ceil(min_observed_frac n) (at
+//! least 1): the mean over the observed points, and below k of them the missing ones count as misses. Without
+//! the floor, a pose that pushes the points out of the observed area, keeping only a few that fit, would score
+//! high. The floor is soft (a missing point costs as a miss) rather than a cut to 0, so the score has no step.
+//! It does not remove the incentive above k: a mean over a subset still favours poses that leave misfits out
+//! of the observed area; the caller sets k from what it expects to overlap (the front end: at least the
+//! points observed at the odometry guess).
+//!
+//! Bound with the observed layer: the coarse table is the block max of the fine values of the observed cells
+//! only (0 elsewhere). For one heading and block, let c_p be that bound for point p, and O_t the points in
+//! observed cells at translation t of the block. Every p in O_t has v_p(t) <= c_p (its cell is observed and in
+//! the block), and c_p >= 0. If |O_t| >= k, the score is the mean of v_p(t) over O_t <= mean of c_p over O_t
+//! <= mean of the |O_t| largest c_p (over all points) <= mean of the k largest c_p, since the mean of the m
+//! largest values does not increase with m. If |O_t| < k, the score is (sum of v_p(t) over O_t) / k <= (sum
+//! of the |O_t| largest c_p) / k <= (sum of the k largest c_p) / k. So the block's bound is the mean of its k
+//! largest c_p: it bounds every candidate of the block whatever subset O_t the translation selects, and the
+//! search stays exact (tested against a full search). (The plain bound, the mean of c_p over all n points, does
+//! not: a translation that leaves only the high-c_p points observed scores above it.) It is looser than the
+//! plain bound (k < n), so more candidates are evaluated.
+//!
 //! Covariance (Olson section IV-B): each candidate within the margin is weighted by w = exp(k (s - s_best))
 //! (s the score, k = `score_gain`); the covariance is the w-weighted second moment of (x, y, theta) about the
 //! w-weighted mean, plus the variance of the lattice quantisation (res^2 / 12, step^2 / 12). k plays the
@@ -89,26 +114,65 @@ pub struct LikelihoodGrid {
     ny: usize,
     /// exp(-d^2 / (2 sigma^2)), row-major [i * ny + j].
     fine: Vec<f32>,
-    /// Max of `fine` over cells [i, i + D) x [j, j + D) (clipped to the grid), row-major.
+    /// Max of `fine` over cells [i, i + D) x [j, j + D) (clipped to the grid), row-major. With the observed
+    /// layer, of the observed cells' `fine` only (see the module documentation).
     coarse: Vec<f32>,
+    /// Observed cells, row-major; None: every cell counts (the plain score).
+    observed: Option<Vec<bool>>,
+}
+
+/// The finite points of `points`.
+fn finite_points(points: &[Point2]) -> Vec<Point2> {
+    points
+        .iter()
+        .copied()
+        .filter(|p| p[0].is_finite() && p[1].is_finite())
+        .collect()
 }
 
 impl LikelihoodGrid {
     /// The table of `points` (fixed frame, m; non-finite ones are ignored). An error for invalid parameters,
     /// no finite point, or a bounding box (plus margins) over [`MAX_CELLS`] cells per side.
     pub fn new(points: &[Point2], params: LikelihoodGridParams) -> Result<Self, ParamError> {
+        Self::build(points, None, params)
+    }
+
+    /// The table of `points` with an observed layer: the cells holding a point of `observed` (fixed frame,
+    /// m, non-finite ones ignored; e.g. the centres of the reference's free and occupied occupancy cells,
+    /// any resolution), dilated by ceil(sigma / res) + 1 cells: one cell fills the holes left by rasterising
+    /// cell centres of a rotated grid onto this one, and sigma (the point error) keeps counting a point that
+    /// lands just past the observed area's edge, e.g. a wall point just behind the observed wall (behind a
+    /// wall is never observed). Measured (tests/sim_slam.py): with one cell less, a far point just past the
+    /// edge, left out at one heading and a miss at the next, decided a near-tie of headings (0.831 vs 0.829)
+    /// into a 5 deg error. The grid's box covers
+    /// both point sets. Errors as [`LikelihoodGrid::new`], and for no finite observed point.
+    pub fn new_with_observed(
+        points: &[Point2],
+        observed: &[Point2],
+        params: LikelihoodGridParams,
+    ) -> Result<Self, ParamError> {
+        let obs = finite_points(observed);
+        if obs.is_empty() {
+            return Err(ParamError("LikelihoodGrid: no finite observed point".into()));
+        }
+        Self::build(points, Some(&obs), params)
+    }
+
+    fn build(
+        points: &[Point2],
+        observed: Option<&[Point2]>,
+        params: LikelihoodGridParams,
+    ) -> Result<Self, ParamError> {
         params.validate()?;
-        let pts: Vec<Point2> = points
-            .iter()
-            .copied()
-            .filter(|p| p[0].is_finite() && p[1].is_finite())
-            .collect();
+        let pts = finite_points(points);
         if pts.is_empty() {
             return Err(ParamError("LikelihoodGrid: no finite reference point".into()));
         }
         let (res, sigma, margin) = (params.res, params.sigma, params.margin);
-        let lo = |k: usize| pts.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
-        let hi = |k: usize| pts.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+        // box of the reference points and the observed points (finite, checked by the callers)
+        let all = || pts.iter().chain(observed.unwrap_or(&[]).iter());
+        let lo = |k: usize| all().map(|p| p[k]).fold(f64::INFINITY, f64::min);
+        let hi = |k: usize| all().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
         let origin = [lo(0) - margin, lo(1) - margin];
         // cells up to and including the one holding max + margin
         let cells = |k: usize| ((hi(k) + margin - origin[k]) / res).floor() + 1.0;
@@ -143,7 +207,28 @@ impl LikelihoodGrid {
             .iter()
             .map(|&d2| if d2 <= cutoff2 { (k * d2).exp() as f32 } else { 0.0 })
             .collect();
-        let coarse = block_max(&fine, nx, ny, params.coarse);
+        let observed = observed.map(|obs| {
+            let mut mask = vec![false; nx * ny];
+            for p in obs {
+                // inside the box by construction; floor of the max + margin is at most nx - 1
+                let i = (((p[0] - origin[0]) / res).floor() as usize).min(nx - 1);
+                let j = (((p[1] - origin[1]) / res).floor() as usize).min(ny - 1);
+                mask[i * ny + j] = true;
+            }
+            dilate(&mask, nx, ny, (sigma / res).ceil() as usize + 1)
+        });
+        // with the layer, bound only the observed cells' values: the only ones a score counts
+        let coarse = match &observed {
+            None => block_max(&fine, nx, ny, params.coarse),
+            Some(mask) => {
+                let masked: Vec<f32> = fine
+                    .iter()
+                    .zip(mask)
+                    .map(|(&v, &o)| if o { v } else { 0.0 })
+                    .collect();
+                block_max(&masked, nx, ny, params.coarse)
+            }
+        };
         Ok(Self {
             params,
             origin,
@@ -151,7 +236,24 @@ impl LikelihoodGrid {
             ny,
             fine,
             coarse,
+            observed,
         })
+    }
+
+    /// Observed cells (row-major, as [`LikelihoodGrid::values`]); None without the observed layer.
+    pub fn observed(&self) -> Option<&[bool]> {
+        self.observed.as_deref()
+    }
+
+    /// True if cell [i, j] is observed (always, inside the grid, without the layer); false outside the grid.
+    #[inline]
+    fn observed_at(&self, i: i64, j: i64) -> bool {
+        (i as usize) < self.nx
+            && (j as usize) < self.ny
+            && self
+                .observed
+                .as_ref()
+                .is_none_or(|m| m[i as usize * self.ny + j as usize])
     }
 
     pub fn params(&self) -> &LikelihoodGridParams {
@@ -220,6 +322,25 @@ fn block_max(v: &[f32], nx: usize, ny: usize, d: usize) -> Vec<f32> {
     out
 }
 
+/// out[i, j] = any of m over [i - r, i + r] x [j - r, j + r], clipped to the grid: two separable passes.
+fn dilate(m: &[bool], nx: usize, ny: usize, r: usize) -> Vec<bool> {
+    let mut rows = vec![false; nx * ny];
+    for i in 0..nx {
+        for j in 0..ny {
+            rows[i * ny + j] = m[i * ny + j.saturating_sub(r)..i * ny + (j + r + 1).min(ny)]
+                .iter()
+                .any(|&b| b);
+        }
+    }
+    let mut out = vec![false; nx * ny];
+    for i in 0..nx {
+        for j in 0..ny {
+            out[i * ny + j] = (i.saturating_sub(r)..(i + r + 1).min(nx)).any(|ii| rows[ii * ny + j]);
+        }
+    }
+    out
+}
+
 /// Search window and covariance weighting of [`match_points`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MatchParams {
@@ -236,6 +357,10 @@ pub struct MatchParams {
     /// k in the candidate weight exp(k (score - best)): the effective number of independent points. Larger
     /// gives a smaller covariance.
     pub score_gain: f64,
+    /// With an observed layer: the score floor k = ceil(this x the number of points), at least 1: a candidate
+    /// with fewer than k points in observed cells scores their sum / k (the missing ones count as misses).
+    /// Unused without the layer.
+    pub min_observed_frac: f64,
 }
 
 impl Default for MatchParams {
@@ -246,18 +371,27 @@ impl Default for MatchParams {
             dtheta: 20f64.to_radians(),
             theta_step: None,
             score_gain: 30.0,
+            min_observed_frac: 0.3,
         }
     }
 }
 
 impl MatchParams {
-    /// dx, dy, dtheta finite and >= 0; theta_step (if given) and score_gain finite and > 0.
+    /// dx, dy, dtheta finite and >= 0; theta_step (if given) and score_gain finite and > 0;
+    /// min_observed_frac in [0, 1].
     pub fn validate(&self) -> Result<(), ParamError> {
         params::non_negative("MatchParams.dx", self.dx)?;
         params::non_negative("MatchParams.dy", self.dy)?;
         params::non_negative("MatchParams.dtheta", self.dtheta)?;
         if let Some(s) = self.theta_step {
             params::positive("MatchParams.theta_step", s)?;
+        }
+        params::non_negative("MatchParams.min_observed_frac", self.min_observed_frac)?;
+        if self.min_observed_frac > 1.0 {
+            return Err(ParamError(format!(
+                "MatchParams.min_observed_frac must be at most 1, got {}",
+                self.min_observed_frac
+            )));
         }
         params::positive("MatchParams.score_gain", self.score_gain)
     }
@@ -268,10 +402,13 @@ impl MatchParams {
 pub struct MatchResult {
     /// Best pose of the query frame in the reference frame (theta wrapped to [-pi, pi)).
     pub pose: Pose2,
-    /// Its score: mean likelihood over the query points, in [0, 1].
+    /// Its score: mean likelihood over the query points (with an observed layer: over those in observed
+    /// cells, with the floor of `MatchParams::min_observed_frac`), in [0, 1].
     pub score: f64,
     /// Number of (finite) query points.
     pub n: usize,
+    /// Query points in observed cells at the best pose (n without an observed layer).
+    pub observed: usize,
     /// Covariance of (x, y, theta) (m^2, m rad, rad^2), row-major.
     pub covariance: [[f64; 3]; 3],
     /// Eigenvalues (min, max) of the covariance's xy block (m^2): sqrt(max) close to the window's
@@ -333,6 +470,7 @@ pub fn match_points(
             pose: Pose2::new(guess.x, guess.y, wrap_angle(guess.theta)),
             score: 0.0,
             n: 0,
+            observed: 0,
             covariance: [[vx, 0.0, 0.0], [0.0, vy, 0.0], [0.0, 0.0, vt]],
             xy_eigenvalues: [vx.min(vy), vx.max(vy)],
             xy_major_axis: if vy > vx { std::f64::consts::FRAC_PI_2 } else { 0.0 },
@@ -357,19 +495,32 @@ pub fn match_points(
     }
     let at = |a: usize| &cells[a * n..(a + 1) * n];
     let inv_n = 1.0 / n as f64;
+    let layer = grid.observed.is_some();
+    // observed layer: fewest query points in observed cells for a non-zero score
+    let k_min = ((params.min_observed_frac * n as f64).ceil() as usize).clamp(1, n);
 
     // Low resolution: one bound per (heading, block of D x D translations).
     let d = grid.params.coarse as i64;
     let mut blocks: Vec<(f64, usize, i64, i64)> = Vec::new();
+    let mut c_p: Vec<f32> = Vec::with_capacity(n);
     for a in 0..thetas.len() {
         let cs = at(a);
         for bx in (-wx..=wx).step_by(d as usize) {
             for by in (-wy..=wy).step_by(d as usize) {
-                let sum: f64 = cs
-                    .iter()
-                    .map(|c| grid.coarse_at(c[0] + bx, c[1] + by) as f64)
-                    .sum();
-                blocks.push((sum * inv_n, a, bx, by));
+                let bound = if layer {
+                    // the mean of the k_min largest per-point bounds (module documentation)
+                    c_p.clear();
+                    c_p.extend(cs.iter().map(|c| grid.coarse_at(c[0] + bx, c[1] + by)));
+                    c_p.select_nth_unstable_by(k_min - 1, |p, q| q.total_cmp(p));
+                    c_p[..k_min].iter().map(|&v| v as f64).sum::<f64>() / k_min as f64
+                } else {
+                    let sum: f64 = cs
+                        .iter()
+                        .map(|c| grid.coarse_at(c[0] + bx, c[1] + by) as f64)
+                        .sum();
+                    sum * inv_n
+                };
+                blocks.push((bound, a, bx, by));
             }
         }
     }
@@ -379,6 +530,7 @@ pub fn match_points(
     // High resolution, best blocks first, until no block can hold a candidate within the margin.
     let margin = -MIN_WEIGHT.ln() / params.score_gain;
     let mut best = (f64::NEG_INFINITY, 0usize, 0i64, 0i64);
+    let mut best_observed = n;
     let mut evaluated: Vec<(f64, usize, i64, i64)> = Vec::new();
     for &(bound, a, bx, by) in &blocks {
         if bound < best.0 - margin {
@@ -387,11 +539,23 @@ pub fn match_points(
         let cs = at(a);
         for tx in bx..(bx + d).min(wx + 1) {
             for ty in by..(by + d).min(wy + 1) {
-                let sum: f64 = cs.iter().map(|c| grid.fine_at(c[0] + tx, c[1] + ty) as f64).sum();
-                let s = sum * inv_n;
+                let (s, m) = if layer {
+                    let (mut sum, mut m) = (0.0f64, 0usize);
+                    for c in cs {
+                        if grid.observed_at(c[0] + tx, c[1] + ty) {
+                            sum += grid.fine_at(c[0] + tx, c[1] + ty) as f64;
+                            m += 1;
+                        }
+                    }
+                    (sum / m.max(k_min) as f64, m)
+                } else {
+                    let sum: f64 = cs.iter().map(|c| grid.fine_at(c[0] + tx, c[1] + ty) as f64).sum();
+                    (sum * inv_n, n)
+                };
                 evaluated.push((s, a, tx, ty));
                 if s > best.0 {
                     best = (s, a, tx, ty);
+                    best_observed = m;
                 }
             }
         }
@@ -442,6 +606,7 @@ pub fn match_points(
         ),
         score: best.0,
         n,
+        observed: best_observed,
         covariance: cov,
         xy_eigenvalues: [half_tr - rad, half_tr + rad],
         xy_major_axis: 0.5 * (2.0 * b).atan2(a - c),
@@ -759,6 +924,198 @@ mod tests {
         ] {
             assert!(match_points(&g, &L_ROOM, Pose2::default(), &bad).is_err());
         }
+    }
+
+    /// Best score of a full search (every candidate of the lattice of `r`), scored as match_points does:
+    /// sum over the points in observed cells / max(their number, k_min).
+    fn full_search_best(
+        g: &LikelihoodGrid,
+        query: &[Point2],
+        guess: Pose2,
+        p: &MatchParams,
+        r: &MatchResult,
+    ) -> f64 {
+        let res = g.params.res;
+        let (wx, wy) = ((p.dx / res).round() as i64, (p.dy / res).round() as i64);
+        let nth = (p.dtheta / r.theta_step).round() as i64;
+        let n = query.len();
+        let k_min = ((p.min_observed_frac * n as f64).ceil() as usize).clamp(1, n);
+        let mut full = f64::NEG_INFINITY;
+        for k in -nth..=nth {
+            for tx in -wx..=wx {
+                for ty in -wy..=wy {
+                    let pose = Pose2::new(
+                        guess.x + tx as f64 * res,
+                        guess.y + ty as f64 * res,
+                        guess.theta + k as f64 * r.theta_step,
+                    );
+                    let (mut sum, mut m) = (0.0, 0usize);
+                    for &q in query {
+                        let q = pose.to_fixed(q);
+                        let i = ((q[0] - g.origin[0]) / res).floor() as i64;
+                        let j = ((q[1] - g.origin[1]) / res).floor() as i64;
+                        if g.observed_at(i, j) {
+                            sum += g.fine_at(i, j) as f64;
+                            m += 1;
+                        }
+                    }
+                    full = full.max(sum / m.max(k_min) as f64);
+                }
+            }
+        }
+        full
+    }
+
+    #[test]
+    fn observed_layer_grid() {
+        let p = LikelihoodGridParams::default();
+        // reference: the left wall; observed: points across the left half of the room, beyond the wall's box
+        let wall = walls(&[[-2.0, -1.75], [-2.0, 1.75]], false, 0.03, 0.0, &mut Rng(9));
+        // (cell centres: x0 = -2.15, the cells' edges are at -2.15 + 0.05 k)
+        let obs: Vec<Point2> = (0..40)
+            .flat_map(|i| (0..70).map(move |j| [-1.975 + 0.05 * i as f64, -1.725 + 0.05 * j as f64]))
+            .collect();
+        let g = LikelihoodGrid::new_with_observed(&wall, &obs, p).unwrap();
+        let plain = LikelihoodGrid::new(&wall, p).unwrap();
+        assert!(plain.observed().is_none() && g.observed().is_some());
+        // same origin (the observed points do not go left of or below the wall), larger along x
+        assert_eq!(g.origin(), plain.origin());
+        assert!(g.shape().0 > plain.shape().0);
+        let cell = |x: f64, y: f64| {
+            (
+                ((x - g.origin[0]) / p.res).floor() as i64,
+                ((y - g.origin[1]) / p.res).floor() as i64,
+            )
+        };
+        let (i, j) = cell(-1.0, 0.0);
+        assert!(g.observed_at(i, j));
+        // dilated by ceil(sigma / res) + 1 = 2 cells: the second cell right of the last observed column is
+        // observed, the third not; behind the wall (left), two cells too
+        let (i, j) = cell(0.075, 0.0);
+        assert!(g.observed_at(i, j) && !g.observed_at(i + 1, j));
+        let (i, j) = cell(-2.075, 0.0);
+        assert!(g.observed_at(i, j) && !g.observed_at(i - 1, j));
+        assert!(!g.observed_at(-1, 0) && !g.observed_at(0, g.shape().1 as i64));
+        // the coarse table bounds the observed cells' fine values of its block
+        for i in -5..g.shape().0 as i64 + 5 {
+            for j in -5..g.shape().1 as i64 + 5 {
+                for (di, dj) in [(0, 0), (3, 0), (0, 3), (2, 1)] {
+                    if g.observed_at(i + di, j + dj) {
+                        assert!(g.coarse_at(i, j) >= g.fine_at(i + di, j + dj));
+                    }
+                }
+            }
+        }
+        assert!(LikelihoodGrid::new_with_observed(&wall, &[[f64::NAN, 0.0]], p).is_err());
+        assert!(LikelihoodGrid::new_with_observed(&wall, &[[1000.0, 0.0]], p).is_err());
+        // too many cells
+    }
+
+    #[test]
+    fn observed_pruned_search_finds_the_full_search_best() {
+        // The bound argument (module documentation) against brute force: observed regions that cut through
+        // the query's walls, so that the subset of observed points changes with the pose, and minimum
+        // fractions from none to all.
+        let mut rng = Rng(10);
+        let room = walls(&L_ROOM, true, 0.03, 0.01, &mut rng);
+        let truth = Pose2::new(0.2, -0.15, 0.1);
+        let query = seen_from(truth, &walls(&L_ROOM, true, 0.04, 0.02, &mut rng));
+        let obs_half: Vec<Point2> = (0..50)
+            .flat_map(|i| (0..80).map(move |j| [-2.2 + 0.05 * i as f64, -2.0 + 0.05 * j as f64]))
+            .collect();
+        // a random scatter: many observed / unobserved boundaries
+        let obs_rand: Vec<Point2> = (0..1500)
+            .map(|_| [rng.uniform(-2.2, 2.2), rng.uniform(-2.0, 2.0)])
+            .collect();
+        let params = MatchParams {
+            dx: 0.3,
+            dy: 0.3,
+            dtheta: 10f64.to_radians(),
+            ..Default::default()
+        };
+        for obs in [&obs_half, &obs_rand] {
+            let g = LikelihoodGrid::new_with_observed(&room, obs, LikelihoodGridParams::default()).unwrap();
+            for frac in [0.0, 0.2, 0.5, 0.9, 1.0] {
+                let p = MatchParams {
+                    min_observed_frac: frac,
+                    ..params
+                };
+                let r = match_points(&g, &query, Pose2::default(), &p).unwrap();
+                let full = full_search_best(&g, &query, Pose2::default(), &p, &r);
+                assert!(
+                    (r.score - full).abs() < 1e-9,
+                    "frac {frac}: {} vs {full}",
+                    r.score
+                );
+                assert!(r.observed <= r.n);
+            }
+        }
+    }
+
+    #[test]
+    fn observed_score_of_a_partial_overlap() {
+        // The reference saw the left half of the L room (its walls and floor there); the query sees the whole
+        // room. Aligned, half of the query points are where the reference never looked: the plain score
+        // counts them as misses, the observed score leaves them out.
+        let mut rng = Rng(11);
+        let left = |p: &Point2| p[0] < 0.0;
+        let room: Vec<Point2> = walls(&L_ROOM, true, 0.03, 0.01, &mut rng)
+            .into_iter()
+            .filter(left)
+            .collect();
+        let obs: Vec<Point2> = (0..40)
+            .flat_map(|i| (0..70).map(move |j| [-1.975 + 0.05 * i as f64, -1.725 + 0.05 * j as f64]))
+            .collect();
+        let truth = Pose2::new(0.12, -0.2, 0.08);
+        let query = seen_from(truth, &walls(&L_ROOM, true, 0.04, 0.015, &mut rng));
+        let gp = LikelihoodGridParams::default();
+        let plain = LikelihoodGrid::new(&room, gp).unwrap();
+        let g = LikelihoodGrid::new_with_observed(&room, &obs, gp).unwrap();
+        let p = MatchParams::default();
+        let rp = match_points(&plain, &query, Pose2::default(), &p).unwrap();
+        let r = match_points(&g, &query, Pose2::default(), &p).unwrap();
+        let frac = r.observed as f64 / r.n as f64;
+        println!(
+            "partial overlap: plain score {:.3}, observed score {:.3} over {:.0} % of the points, {} vs {} \
+             candidates evaluated",
+            rp.score,
+            r.score,
+            100.0 * frac,
+            r.evaluated,
+            rp.evaluated
+        );
+        let (dp, dth) = errors(&r, truth);
+        assert!(dp < 0.05 && dth < 1.5f64.to_radians(), "{dp} m, {dth} rad");
+        assert!(rp.score < 0.55 && r.score > 0.75, "{} {}", rp.score, r.score);
+        assert!(frac > 0.35 && frac < 0.75, "{frac}");
+    }
+
+    #[test]
+    fn an_everywhere_observed_layer_scores_as_without() {
+        // every cell the query can reach observed (all but the grid's margin): the same best pose and score
+        // as the plain grid (the search differs: the looser bound evaluates more candidates)
+        let mut rng = Rng(12);
+        // noise-free: the box corner is at a wall vertex, so that both grids' cell edges coincide
+        let room = walls(&L_ROOM, true, 0.03, 0.0, &mut rng);
+        let obs: Vec<Point2> = (0..100)
+            .flat_map(|i| (0..90).map(move |j| [-2.5 + 0.05 * i as f64, -2.25 + 0.05 * j as f64]))
+            .collect();
+        let gp = LikelihoodGridParams::default();
+        let plain = LikelihoodGrid::new(&room, gp).unwrap();
+        let g = LikelihoodGrid::new_with_observed(&room, &obs, gp).unwrap();
+        let truth = Pose2::new(-0.2, 0.3, -0.12);
+        let query = seen_from(truth, &walls(&L_ROOM, true, 0.04, 0.015, &mut rng));
+        // the guess on the plain grid's cell lattice for both (the grids' origins differ)
+        let shift = [g.origin[0] - plain.origin[0], g.origin[1] - plain.origin[1]];
+        assert!((shift[0] / gp.res - (shift[0] / gp.res).round()).abs() < 1e-9);
+        assert!((shift[1] / gp.res - (shift[1] / gp.res).round()).abs() < 1e-9);
+        let p = MatchParams::default();
+        let rp = match_points(&plain, &query, Pose2::default(), &p).unwrap();
+        let r = match_points(&g, &query, Pose2::default(), &p).unwrap();
+        assert_eq!((r.pose, r.observed), (rp.pose, rp.n));
+        // the cell centres differ by rounding (different origins): f32 values within an ulp or so
+        assert!((r.score - rp.score).abs() < 1e-6);
+        assert!(r.evaluated >= rp.evaluated);
     }
 
     #[test]

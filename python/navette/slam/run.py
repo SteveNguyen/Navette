@@ -195,7 +195,7 @@ def main(argv=None):
     for m in fe.matches:
         w = "" if m.window is None else f" window {m.window[0]:.2f} m {math.degrees(m.window[2]):.0f} deg"
         ref = f"{m.ref[0]}-{m.ref[-1]}" if m.ref else "-"
-        print(f"  submap {m.query:3d} ({m.kind}) vs {ref:7s} score {m.score:.2f} n {m.n:4d} ref {m.n_ref:5d} "
+        print(f"  submap {m.query:3d} ({m.kind}) vs {ref:7s} score {m.score:.2f} n {m.n:4d} obs {m.n_obs:4d} ref {m.n_ref:5d} "
               f"sigma {m.sigma_xy:.3f} m {math.degrees(m.sigma_th):4.1f} deg{w}: {m.reason}")
     rows = {}
     if seq.gt is not None:
@@ -223,10 +223,10 @@ def main(argv=None):
                [[f"{seq.t[i]:.3f}", *(f"{v:.4f}" for v in seq.odom[i]), *(f"{v:.4f}" for v in slam[i]), int(sub[i])]
                 for i in range(len(seq))])
     _write_csv(os.path.join(args.out, "matches.csv"),
-               ["query", "kind", "ref_first", "ref_last", "base", "score", "n", "n_ref", "sigma_xy", "sigma_th_deg",
+               ["query", "kind", "ref_first", "ref_last", "base", "score", "n", "n_obs", "n_ref", "sigma_xy", "sigma_th_deg",
                 "window_xy", "window_th_deg", "accepted", "dcs_scale", "reason"],
                [[m.query, m.kind, m.ref[0] if m.ref else "", m.ref[-1] if m.ref else "", m.base, f"{m.score:.3f}",
-                 m.n, m.n_ref, f"{m.sigma_xy:.4f}", f"{math.degrees(m.sigma_th):.2f}",
+                 m.n, m.n_obs, m.n_ref, f"{m.sigma_xy:.4f}", f"{math.degrees(m.sigma_th):.2f}",
                  "" if m.window is None else f"{m.window[0]:.3f}",
                  "" if m.window is None else f"{math.degrees(m.window[2]):.1f}", int(m.edge is not None),
                  f"{m.dcs_scale:.3f}", m.reason] for m in fe.matches])

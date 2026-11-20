@@ -85,6 +85,34 @@ def test_guess_outside_the_window_scores_low():
     assert match_points(g, query, (0.0, 0.0, 0.0))["score"] < 0.35
 
 
+def test_observed_layer_scores_a_partial_overlap():
+    """The reference saw the left half of the room (walls and floor); the query sees all of it. The plain score
+    counts the right half as misses; with the observed layer only the points the reference could see count."""
+    rng = np.random.default_rng(4)
+    ref = walls(L_ROOM, 0.03, 0.01, rng)
+    ref = ref[ref[:, 0] < 0.0]
+    gx, gy = np.meshgrid(np.arange(-1.975, 0.0, 0.05), np.arange(-1.725, 1.75, 0.05), indexing="ij")
+    observed = np.column_stack([gx.ravel(), gy.ravel()])
+    plain = LikelihoodGrid(ref)
+    g = LikelihoodGrid(ref, observed=observed)
+    assert plain.observed is None
+    obs = g.observed
+    assert obs.dtype == bool and obs.shape == g.values.shape and 0 < obs.sum() < obs.size
+    truth = (0.12, -0.2, 0.08)
+    query = to_robot(walls(L_ROOM, 0.04, 0.015, rng), truth)
+    rp = match_points(plain, query, (0.0, 0.0, 0.0))
+    r = match_points(g, query, (0.0, 0.0, 0.0))
+    assert rp["observed"] == rp["n"] == len(query)
+    x, y, th = r["pose"]
+    assert math.hypot(x - truth[0], y - truth[1]) < 0.05 and abs(th - truth[2]) < math.radians(1.5)
+    assert rp["score"] < 0.55 and r["score"] > 0.75
+    assert 0.35 < r["observed"] / r["n"] < 0.75
+    # the floor: with fewer than k = ceil(0.95 n) points in observed cells, the score is their sum / k
+    k = math.ceil(0.95 * r["n"])
+    at = match_points(g, query, r["pose"], dx=0.0, dy=0.0, dtheta=0.0, min_observed_frac=0.95)
+    assert at["observed"] == r["observed"] and at["score"] == pytest.approx(r["score"] * r["observed"] / k)
+
+
 def test_argument_errors():
     pts = np.array([[0.0, 0.0], [1.0, 0.0]])
     with pytest.raises(ValueError):
@@ -93,9 +121,15 @@ def test_argument_errors():
         LikelihoodGrid(pts, res=0.0)
     with pytest.raises(ValueError):
         LikelihoodGrid(np.full((2, 2), np.nan))
+    with pytest.raises(ValueError):
+        LikelihoodGrid(pts, observed=np.full((1, 2), np.nan))
+    with pytest.raises(ValueError):
+        LikelihoodGrid(pts, observed=np.zeros((2, 3)))
     g = LikelihoodGrid(pts)
     with pytest.raises(ValueError):
         match_points(g, pts, (0.0, 0.0, 0.0), dx=-1.0)
+    with pytest.raises(ValueError):
+        match_points(g, pts, (0.0, 0.0, 0.0), min_observed_frac=1.5)
     with pytest.raises(ValueError):
         match_points(g, np.zeros((2, 3)), (0.0, 0.0, 0.0))
     # no point: the guess, score 0

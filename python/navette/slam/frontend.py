@@ -17,13 +17,16 @@ Submaps (`Submap`):
     match_travel (off by default, see SlamParams).
   Each submap has an anchor = the odometry pose of its first frame; its frames are kept relative to the anchor
   (they move rigidly with it: a loop correction moves whole submaps), a local OccupancyGrid is built from its
-  frames in the anchor frame, and its obstacle points (cells over points_logodds) are what matching uses.
+  frames in the anchor frame, and its obstacle points (cells over points_logodds) are what matching uses; the
+  centres of its known cells (free or obstacle) are what it has observed.
 
 Pose graph: node k = anchor of submap k in the map frame, node 0 fixed (map = odom at the start). Odometry
 edge k-1 -> k: the odometry motion between the two anchors, information from the noise model in SlamParams
 (see `odometry_sigmas`). Loop edge r -> j: the match of submap j's points against a reference built from the
 earlier submaps near it (at their corrected poses); r is the reference submap whose anchor is nearest; robust
-(DCS, dcs_phi ~10: at 1, true loops with a few sigma of drift are dropped).
+(DCS, dcs_phi ~10: at 1, true loops with a few sigma of drift are dropped). The match is scored only over the
+query points that land where the reference submaps observed something (observed_score): a spin sees 360 deg,
+its references usually less, and points the reference never looked at say nothing about the alignment.
 
 Frames: odom and the returned poses are base poses (x, y, theta); a scan is in the camera's horizontal frame,
 heading cam_heading in the base frame: its pose is (x, y, theta + cam_heading), as runtime/replay.py.
@@ -78,7 +81,20 @@ class SlamParams:
     window_th_max_deg: float = 30.0
     min_points: int = 60               # query submap points
     min_ref_points: int = 100          # reference points
-    min_score: float = 0.5             # mean likelihood of the query points (0..1)
+    min_score: float = 0.6             # mean likelihood of the query points (0..1); with observed_score, of
+                                       # those in observed cells. 0.6, not the plain score's 0.5: measured
+                                       # (sim, 10 seeds x 1-2 loops) wrong poses that pass the observed checks
+                                       # score <= 0.44 (a few 0.6-0.65, rejected as ill-conditioned), correct
+                                       # accepted ones >= 0.74 (0.72 on recorded runs)
+    observed_score: bool = True        # score only the query points in cells the reference observed (free or
+                                       # obstacle in its submaps' grids). Off (the plain score: all points):
+                                       # on recorded runs views that line up where they overlap scored
+                                       # 0.19-0.49, the rest of the view being where the reference never looked
+    min_observed_frac: float = 0.5     # with observed_score: fewest query points in observed cells, as a
+    min_observed_points: int = 60      # fraction and as a count (as min_points), to accept a match; the
+                                       # fraction is also the search's score floor (see _match_run). 0.5:
+                                       # measured (sim), matches whose observed fraction is below ~0.5 include
+                                       # gross false ones (0.6-0.9 m off), correct ones are mostly >= 0.6
     max_cond_frac: float = 0.2         # sqrt(lambda_max xy) <= this x the xy half-window (unconstrained:
                                        # ~0.58, Olson covariance of a flat score over the window)
     max_th_cond_frac: float = 0.2      # sqrt(var theta) <= this x the heading half-window
@@ -107,6 +123,7 @@ class Submap:
     anchor_odom: tuple
     last: int | None = None
     points: np.ndarray | None = None
+    observed: np.ndarray | None = None  # (M, 2) centres of the known (free or obstacle) cells, anchor frame
 
 
 @dataclass
@@ -126,6 +143,7 @@ class Match:
     window: tuple | None = None
     score: float = 0.0
     n: int = 0
+    n_obs: int = 0                     # query points in observed reference cells at the pose (n if plain)
     n_ref: int = 0
     sigma_xy: float = float("nan")
     sigma_th: float = float("nan")
@@ -321,13 +339,14 @@ class SlamFrontEnd:
     def _close(self, sm, kind, last=None):
         """Close submap sm: build its local grid and points from the open frames, then match it."""
         sm.kind, sm.last = kind, len(self._t) - 1 if last is None else last
-        sm.points = self._points(sm, self._open_frames)
+        sm.points, sm.observed = self._points(sm, self._open_frames)
         self._open_frames = []
         if self.loops and (kind == "spin" or self.p.match_travel):
             self._match(sm)
 
     def _points(self, sm, frames):
-        """Obstacle points (N, 2) of a submap in its anchor frame, from a local OccupancyGrid of its frames."""
+        """(obstacle points (N, 2), observed cell centres (M, 2)) of a submap in its anchor frame, from a local
+        OccupancyGrid of its frames. Observed = known to the grid (free or obstacle, |log-odds| > its thr)."""
         from navette import OccupancyGrid
 
         p = self.p
@@ -339,9 +358,12 @@ class SlamFrontEnd:
             grid.update(self._t[i], pose, to_scan(scan), sigma=p.grid_sigma, h=cam_h, max_range=p.grid_max_range_m,
                         force=glance)
         if grid.x0 is None:
-            return np.zeros((0, 2))
+            return np.zeros((0, 2)), np.zeros((0, 2))
         ij = np.argwhere(grid.log_odds > p.points_logodds).astype(np.int64)
-        return grid.centres(ij) if len(ij) else np.zeros((0, 2))
+        obstacle, free = grid.masks()
+        ko = np.argwhere(obstacle | free).astype(np.int64)
+        return (grid.centres(ij) if len(ij) else np.zeros((0, 2)),
+                grid.centres(ko) if len(ko) else np.zeros((0, 2)))
 
     # ------------------------------------------------------------------ matching
 
@@ -416,24 +438,41 @@ class SlamFrontEnd:
         # edge base: the run's submap whose anchor is nearest the guess
         m.base = min(run, key=lambda c: (math.hypot(*(nodes[c, :2] - guess[:2])), c))
         # the reference: the run's points at their corrected poses (map frame)
-        ref = np.vstack([compose(np.broadcast_to(nodes[c], (len(self.submaps[c].points), 3)),
-                                 np.column_stack([self.submaps[c].points, np.zeros(len(self.submaps[c].points))]))
-                         [:, :2] for c in run])
+        def to_map(c, xy):  # points of submap c (its anchor frame) at its corrected pose
+            return compose(np.broadcast_to(nodes[c], (len(xy), 3)), np.column_stack([xy, np.zeros(len(xy))]))[:, :2]
+
+        ref = np.vstack([to_map(c, self.submaps[c].points) for c in run])
         m.n_ref = len(ref)
         if m.n_ref < p.min_ref_points:
             m.reason = f"reference points {m.n_ref} < {p.min_ref_points}"
             return
-        lg = LikelihoodGrid(ref, res=p.match_res, sigma=p.match_sigma, margin=3 * p.match_sigma)
-        res = match_points(lg, sm.points, tuple(guess), dx=wxy, dy=wxy, dtheta=wth)
+        # observed layer: the run's known cells (a submap with obstacle points has known cells: never empty)
+        observed = np.vstack([to_map(c, self.submaps[c].observed) for c in run]) if p.observed_score else None
+        lg = LikelihoodGrid(ref, res=p.match_res, sigma=p.match_sigma, margin=3 * p.match_sigma, observed=observed)
+        frac = p.min_observed_frac
+        if observed is not None:
+            # Observed score floor (k in the matcher: sum over the observed points / max(their number, k)): at
+            # least the points observed at the guess. The score is a mean over the observed points, so a pose
+            # that moves misaligned points out of the observed area scores higher; with k = the count at the
+            # guess, moving points out below that count no longer pays. Measured (tests/sim_slam.py, 2 loops,
+            # 10 seeds): with a fixed k of 0.3-0.5 n, 9-18 false loop closures (0.1-0.9 m off), all with the
+            # best pose's observed count at the floor; with this k, none beyond 0.1 m.
+            at = match_points(lg, sm.points, tuple(guess), dx=0.0, dy=0.0, dtheta=0.0, min_observed_frac=0.0)
+            frac = max(frac, at["observed"] / at["n"])
+        res = match_points(lg, sm.points, tuple(guess), dx=wxy, dy=wxy, dtheta=wth, min_observed_frac=frac)
         m.ms = 1000 * (time.perf_counter() - t0)
         r = m.base
         m.pose, m.score, m.n = tuple(float(v) for v in res["pose"]), float(res["score"]), int(res["n"])
+        m.n_obs = int(res["observed"])
         cov = np.asarray(res["covariance"], float)
         m.sigma_xy, m.sigma_th = math.sqrt(res["xy_eigenvalues"][1]), math.sqrt(cov[2, 2])
         off = np.array(m.pose) - guess
         off[2] = wrap(off[2])
         min_score = p.min_score if sm.kind == "spin" else max(p.min_score, p.travel_min_score)
-        if m.score < min_score:
+        if p.observed_score and m.n_obs < max(p.min_observed_points, math.ceil(p.min_observed_frac * m.n)):
+            m.reason = f"observed query points {m.n_obs} of {m.n} < {p.min_observed_points} or " \
+                       f"{p.min_observed_frac:.0%}"
+        elif m.score < min_score:
             m.reason = f"score {m.score:.2f} < {min_score}"
         elif m.sigma_xy > p.max_cond_frac * wxy:
             m.reason = f"ill-conditioned xy: {m.sigma_xy:.3f} m > {p.max_cond_frac} x {wxy:.2f}"
