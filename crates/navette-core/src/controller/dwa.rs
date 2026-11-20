@@ -103,6 +103,12 @@ pub struct ExploreParams {
     /// After that recovery turn, for this long (s) the goal does not turn back toward the blocked direction:
     /// a path heading nearer to it than to the recovery heading is replaced by the recovery heading. 0: no hold.
     pub recover_hold_s: f64,
+    /// Exploration only ([`crate::exploration::frontier_explore`]): after driving this far (m, path length)
+    /// since the last full look (or the start), turn in place one full circle plus a margin, in one direction,
+    /// at the turns' rates (w_spin, slowing down with spin_accel). 0: never (the prototype). Why: the SLAM
+    /// front end builds a submap from each turn in place, and the robot's own turns span 60-260 deg (back and
+    /// forth looks), never a full circle, so few submaps could be matched (docs/SLAM.md).
+    pub look360_m: f64,
 }
 
 impl Default for ExploreParams {
@@ -132,6 +138,7 @@ impl Default for ExploreParams {
             progress_deg: 17.0, // ~0.3 rad
             recover_replan: false,
             recover_hold_s: 0.0,
+            look360_m: 0.0,
         }
     }
 }
@@ -164,6 +171,7 @@ impl ExploreParams {
             ("progress_m", self.progress_m),
             ("progress_deg", self.progress_deg),
             ("recover_hold_s", self.recover_hold_s),
+            ("look360_m", self.look360_m),
         ] {
             params::non_negative(&format!("ExploreParams.{name}"), value)?;
         }
@@ -240,13 +248,18 @@ fn turn(p: &ExploreParams, latch: &mut Option<Turn>, goal: f64, err: f64, dir0: 
     } else {
         dir0
     };
-    let w = if p.spin_accel > 0.0 {
-        let slowed = (2.0 * p.spin_accel * to_go(err, dir)).sqrt();
+    (0.0, spin_rate(p, to_go(err, dir)).copysign(dir))
+}
+
+/// |w| (rad/s) of a turn in place with `left` (rad, >= 0) still to turn: w_spin, or with `spin_accel` > 0
+/// min(w_spin, max(spin_w_min, sqrt(2 spin_accel left))).
+pub(crate) fn spin_rate(p: &ExploreParams, left: f64) -> f64 {
+    if p.spin_accel > 0.0 {
+        let slowed = (2.0 * p.spin_accel * left).sqrt();
         p.w_spin.min(slowed.max(p.spin_w_min))
     } else {
         p.w_spin
-    };
-    (0.0, w.copysign(dir))
+    }
 }
 
 /// See the module documentation. One controller per robot; call [`ArcController::step`] once per frame.

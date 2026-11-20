@@ -11,13 +11,16 @@
 //!   place. The second block on the same target bans it.
 //!   With `recover_replan` (off by default) the recovery replans first and turns toward the new path, see
 //!   [`ExploreParams::recover_replan`]; `recover_hold_s` then keeps it from turning straight back.
+//! - Full look (only with `look360_m` > 0, off by default): every `look360_m` driven, the robot stops and turns
+//!   LOOK360_DEG in place in one direction (state Look), for a complete local view (the camera sees ~70 deg).
+//!   See [`ExploreParams::look360_m`] and [`FrontierExplore::full_look`].
 //!
 //! Numerics follow the Python prototype (the side of the recovery turn sums as numpy does).
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
 use crate::collision_monitor::SafetyParams;
-use crate::controller::dwa::{ArcController, ExploreParams, GoalSource};
+use crate::controller::dwa::{spin_rate, ArcController, ExploreParams, GoalSource};
 use crate::controller::State;
 use crate::exploration::frontier::{FrontierParams, FrontierPlanner};
 use crate::geometry::{wrap_angle, Point2, Pose2};
@@ -29,6 +32,22 @@ use crate::scan::Scan;
 const SAME_TARGET_M: f64 = 0.3;
 /// recover_replan: a new path heading within this (deg) of the blocked direction is the same way.
 const RECOVER_SAME_DEG: f64 = 20.0;
+/// look360_m: a full look turns this much (deg): the full circle and 20 deg of overlap, so that the view (and
+/// the SLAM front end's submap of the turn) closes on itself.
+const LOOK360_DEG: f64 = 380.0;
+
+/// A full look under way (look360_m).
+#[derive(Clone, Copy, Debug)]
+struct FullLook {
+    /// +1 counter-clockwise (left), -1 clockwise.
+    dir: f64,
+    /// Angle turned so far in `dir` (rad), from the measured pose.
+    turned: f64,
+    /// The heading at the last step (rad).
+    theta: f64,
+    /// Start time (s).
+    t0: f64,
+}
 
 /// The sum of `a` in numpy's order (pairwise, 8 partial sums per block of at most 128 values): sums that
 /// are compared must round the same way.
@@ -233,6 +252,14 @@ pub struct FrontierExplore {
     last_t: Option<f64>,
     /// Angle turned in place (rad) since the planner last had a frontier.
     looked: f64,
+    /// look360_m: distance driven (m, path length of the poses) since the last full look or the start,
+    driven: f64,
+    /// the pose of the last step,
+    last_pose: Option<Pose2>,
+    /// the full look under way,
+    full_look: Option<FullLook>,
+    /// and the full looks started so far (logs, tests).
+    pub full_looks: u32,
 }
 
 impl FrontierExplore {
@@ -266,7 +293,59 @@ impl FrontierExplore {
             goals,
             last_t: None,
             looked: 0.0,
+            driven: 0.0,
+            last_pose: None,
+            full_look: None,
+            full_looks: 0,
         })
+    }
+
+    /// look360_m: the command of the full look, or None (no look under way, or it just ended: drive).
+    ///
+    /// Starts once `look360_m` has been driven, only while driving: not during a turn in place toward a goal
+    /// (SPIN), a recovery turn, or with no frontier left (the LOOK / DONE look-around is already a turn).
+    /// Direction: toward the current goal, so that the look ends facing a little past it. The angle turned is
+    /// measured on the pose, not integrated from the command: the runtime caps w (controller.w_max) and the
+    /// base lags. It ends after LOOK360_DEG, or after LOOK360_DEG / spin_w_min (s; the slowest rate the turn
+    /// asks for) if the base does not follow. Turning in place is always allowed by the collision monitor
+    /// (a request with v <= 0 keeps its w: the robot is a disk), so nothing else can stop it but the runtime
+    /// (STOP builds a new navigator).
+    fn full_look(&mut self, t: f64, pose: Pose2) -> Option<(f64, f64)> {
+        let p = &self.controller.params;
+        if self.full_look.is_none() {
+            let start = self.driven >= p.look360_m
+                && self.controller.state == State::Drive
+                && self.goals.recover.is_none()
+                && !self.goals.planner.done();
+            if !start {
+                return None;
+            }
+            let toward = self.controller.goal.map_or(0.0, |g| wrap_angle(g - pose.theta));
+            self.full_look = Some(FullLook {
+                dir: if toward < 0.0 { -1.0 } else { 1.0 },
+                turned: 0.0,
+                theta: pose.theta,
+                t0: t,
+            });
+            self.full_looks += 1;
+        }
+        let look = self.full_look.as_mut().expect("set above");
+        look.turned += wrap_angle(pose.theta - look.theta) * look.dir;
+        look.theta = pose.theta;
+        let total = LOOK360_DEG.to_radians();
+        if look.turned >= total || t - look.t0 > total / p.spin_w_min {
+            self.full_look = None;
+            self.driven = 0.0;
+            // a fresh start, as after the look-around: the time spent turning is not "no progress"
+            let c = &mut self.controller;
+            (c.state, c.progress, c.turn, c.blocked_since) = (State::Drive, None, None, None);
+            if self.goals.planner.done() {
+                self.looked = TAU; // that was the look-around: no second one
+            }
+            return None;
+        }
+        self.controller.state = State::Look;
+        Some((0.0, spin_rate(p, total - look.turned).copysign(look.dir)))
     }
 
     /// Drive, Spin, Look or Done.
@@ -297,6 +376,16 @@ impl FrontierExplore {
         }
         if t - self.goals.last_plan >= self.goals.planner.params.replan_s {
             self.goals.plan(t, pose, grid);
+        }
+        if self.controller.params.look360_m > 0.0 {
+            // driven: not while a full look turns (the balancing base rolls on a few cm as it stops)
+            if let (Some(last), None) = (self.last_pose, self.full_look) {
+                self.driven += (pose.x - last.x).hypot(pose.y - last.y);
+            }
+            self.last_pose = Some(pose);
+            if let Some(cmd) = self.full_look(t, pose) {
+                return cmd;
+            }
         }
         let c = &mut self.controller;
         if self.goals.planner.done() && self.goals.recover.is_none() {
@@ -558,6 +647,147 @@ mod tests {
                 assert_eq!(fe.goals.choose_goal(6.0, right, &g), path(&fe)); // 2 s after the turn ended
             }
         }
+    }
+
+    fn looking(look360_m: f64, spin_accel: f64) -> FrontierExplore {
+        let params = ExploreParams {
+            rotate_in_place: true,
+            look360_m,
+            spin_accel,
+            ..Default::default()
+        };
+        FrontierExplore::new(params, SafetyParams::default(), FrontierParams::default()).unwrap()
+    }
+
+    /// Steps 0.1 s apart from `t0`, at heading 0 (toward the door), the pose moving 5 cm per step along x
+    /// (`dir` +1 or -1) from `x0`, for `n` steps; the commands.
+    fn drive(
+        fe: &mut FrontierExplore,
+        g: &OccupancyGrid,
+        t0: f64,
+        x0: f64,
+        dir: f64,
+        n: usize,
+    ) -> Vec<(f64, f64)> {
+        (0..n)
+            .map(|k| {
+                let pose = Pose2::new(x0 + dir * 0.05 * k as f64, 0.0, 0.0);
+                fe.step(t0 + 0.1 * k as f64, pose, None, g, 0.1, 0.0, None)
+            })
+            .collect()
+    }
+
+    /// From heading 0 at `at`, steps 0.1 s apart turning by each command (a base that follows exactly), while
+    /// the state is Look; the commands.
+    fn turn_while_looking(
+        fe: &mut FrontierExplore,
+        g: &OccupancyGrid,
+        t0: f64,
+        at: (f64, f64),
+    ) -> Vec<(f64, f64)> {
+        let (mut theta, mut cmds) = (0.0, Vec::new());
+        for k in 0..200 {
+            let cmd = fe.step(
+                t0 + 0.1 * k as f64,
+                Pose2::new(at.0, at.1, wrap_angle(theta)),
+                None,
+                g,
+                0.0,
+                0.0,
+                None,
+            );
+            if fe.state() != State::Look {
+                break;
+            }
+            cmds.push(cmd);
+            theta += cmd.1 * 0.1;
+        }
+        cmds
+    }
+
+    #[test]
+    fn a_full_look_after_look360_m_driven_turns_380_deg_in_one_direction() {
+        let g = room(0.8);
+        // off (the default): driving 1 m never stops for a look
+        let mut fe = looking(0.0, 0.0);
+        drive(&mut fe, &g, 0.0, -0.8, 1.0, 21);
+        assert!(fe.state() == State::Drive && fe.full_looks == 0);
+        // every ~1 m (0.975: below 20 x 5 cm, whatever the rounding): at 1.0 m driven it stands still and turns
+        let mut fe = looking(0.975, 0.0);
+        let cmds = drive(&mut fe, &g, 0.0, -0.8, 1.0, 21);
+        assert!(cmds[..20].iter().all(|c| c.0 > 0.0), "{cmds:?}");
+        assert_eq!((fe.state(), fe.full_looks, cmds[20].0), (State::Look, 1, 0.0));
+        let turn = turn_while_looking(&mut fe, &g, 2.1, (0.2, 0.0));
+        let w0 = turn[0].1;
+        assert!(w0 != 0.0 && turn.iter().all(|&(v, w)| v == 0.0 && w == w0)); // w_spin, one way
+        let turned = (turn.len() as f64 * w0.abs() * 0.1).to_degrees();
+        assert!((380.0..380.0 + 6.0).contains(&turned), "{turned}"); // ends within a step past 380 deg
+                                                                     // and drives on; the next one 1 m later, not before
+        assert!(fe.state() == State::Drive && fe.full_looks == 1);
+        let cmds = drive(&mut fe, &g, 10.0, 0.2, -1.0, 21);
+        assert!(cmds[..20].iter().all(|c| c.0 > 0.0) && fe.full_looks == 2);
+    }
+
+    #[test]
+    fn a_full_look_slows_down_with_spin_accel_and_ends_if_the_base_does_not_turn() {
+        let g = room(0.8);
+        let mut fe = looking(0.975, 0.5);
+        drive(&mut fe, &g, 0.0, -0.8, 1.0, 21);
+        let turn = turn_while_looking(&mut fe, &g, 2.1, (0.2, 0.0));
+        let w: Vec<f64> = turn.iter().map(|c| c.1.abs()).collect();
+        assert_eq!(w[0], 1.0); // w_spin while far from the end
+        assert!(
+            w.last().unwrap() < &0.5 && w.windows(2).all(|p| p[1] <= p[0]),
+            "{w:?}"
+        );
+        // a base that does not turn (held, stalled): the look gives up after 380 deg / spin_w_min (22 s)
+        let mut fe = looking(0.975, 0.5);
+        drive(&mut fe, &g, 0.0, -0.8, 1.0, 21);
+        let here = Pose2::new(0.2, 0.0, 0.0);
+        let n = (0..400)
+            .take_while(|&k| {
+                fe.step(2.1 + 0.1 * k as f64, here, None, &g, 0.0, 0.0, None);
+                fe.state() == State::Look
+            })
+            .count();
+        let limit = 380f64.to_radians() / 0.3;
+        assert!((n as f64 * 0.1 - limit).abs() < 0.15, "{n}");
+    }
+
+    #[test]
+    fn a_full_look_waits_for_a_recovery_turn_and_leaves_the_look_around_alone() {
+        // due during a recovery turn: the turn finishes first, then the look
+        let g = room(0.8);
+        let mut fe = looking(0.975, 0.0);
+        drive(&mut fe, &g, 0.0, -0.8, 1.0, 20); // 0.95 m
+        fe.goals.recover = Some(-FRAC_PI_2);
+        let (_, w) = fe.step(2.0, Pose2::new(0.2, 0.0, 0.0), None, &g, 0.0, 0.0, None);
+        assert!(w < 0.0 && fe.full_looks == 0 && fe.state() != State::Look);
+        fe.step(2.1, Pose2::new(0.2, 0.0, -FRAC_PI_2), None, &g, 0.0, 0.0, None); // turned: recovery over
+        assert!(fe.goals.recover.is_none());
+        // the controller turns back toward the door (SPIN): the look waits for DRIVE
+        let mut k = 0;
+        while fe.state() != State::Look {
+            assert!(k < 30, "no full look");
+            let theta = -FRAC_PI_2 * (1.0 - k as f64 / 10.0).max(0.0);
+            fe.step(
+                2.2 + 0.1 * k as f64,
+                Pose2::new(0.2, 0.0, theta),
+                None,
+                &g,
+                0.0,
+                0.0,
+                None,
+            );
+            assert!(fe.full_looks == 0 || theta.abs() < 0.4, "{k} {theta}");
+            k += 1;
+        }
+        assert_eq!(fe.full_looks, 1);
+        // no frontier at all: the prototype's look-around (LOOK, then DONE), no full look
+        let mut fe = looking(0.01, 0.0);
+        let closed = room(0.0);
+        drive(&mut fe, &closed, 0.0, -0.8, 1.0, 21);
+        assert_eq!(fe.full_looks, 0);
     }
 
     #[test]

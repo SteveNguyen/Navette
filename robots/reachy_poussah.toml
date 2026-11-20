@@ -104,6 +104,12 @@ progress_deg = 17.0
 # blocked_progress on no recovery fired at all. Re-check if recoveries come back on the robot.
 recover_replan = false
 recover_hold_s = 0.0
+# Full look: every look360_m driven, stop and turn in place 380 deg in one direction (the core default 0: never).
+# Why: the SLAM front end (docs/SLAM.md) makes a submap from each turn in place and matches it against earlier
+# ones; in the recorded explorations this robot's turns spanned 60-260 deg (back-and-forth looks), never a full
+# circle, so few submaps could be matched. A full turn sees all around (camera ~70 deg wide): loop closures,
+# later relocalisation, and the map. Cost: ~15 s per look at the ~0.43 rad/s this base turns (controller.w_max).
+look360_m = 2.5
 
 [behaviour]
 default = "explore"

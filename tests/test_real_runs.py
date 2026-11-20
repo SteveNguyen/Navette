@@ -54,7 +54,7 @@ MASK_SHAPE = (192, 320)  # the reference robot's floor masks
 # the [explore] switches at the core's defaults: the prototype's behaviour
 PROTOTYPE_EXPLORE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0,
                      "blocked_s": 1.0, "blocked_progress": False,
-                     "recover_replan": False, "recover_hold_s": 0.0}
+                     "recover_replan": False, "recover_hold_s": 0.0, "look360_m": 0.0}
 # the [perception] near persistence at the core's default (1 of 1: off)
 PROTOTYPE_PERCEPTION = {"near_k": 1, "near_n": 1}
 

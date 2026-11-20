@@ -77,6 +77,8 @@ class Explore:
     recover_replan: bool  # recovery: replan, turn toward the new path (same way or none: the previous turn's way);
     #                       false: 90 deg toward the freer side (the core default)
     recover_hold_s: float  # s, after that recovery the goal does not turn back toward the blocked way (0 = off)
+    look360_m: float  # m, after driving this far since the last full look, turn in place a full circle (380 deg)
+    #                   in one direction, for a complete local view (SLAM submaps); 0 = never (the core default)
 
 
 @dataclass(frozen=True)

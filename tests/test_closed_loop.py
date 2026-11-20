@@ -13,6 +13,8 @@ what the Python prototype reached there:
     0.46 s late, yaw rate lagging 0.2 s, speeds capped as the runtime does), the exploration switches of
     [explore] (near_known, latched turns, progress-based blocks, replanned recovery) turn less in place and
     reverse their turns less than the prototype's behaviour, with no collision and the same coverage;
+  - in the same corridor, the full look (look360_m): a turn in place of >= 360 deg after every look360_m driven,
+    and the exploration still finishes, without collision;
   - single-frame near flicker (the floor model's false patches at the image bottom): with the reference robot's
     near persistence (2 of 3) the robot drives through it, and still stops for a box that fills the image bottom.
 
@@ -167,9 +169,9 @@ def test_restart_hysteresis_avoids_short_bursts():
 ROBOT_TOML = Path(__file__).parents[1] / "robots" / "reachy_poussah.toml"
 # the [explore] switches at the core's defaults: the prototype's behaviour
 PROTOTYPE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0, "blocked_s": 1.0,
-             "blocked_progress": False, "recover_replan": False, "recover_hold_s": 0.0}
+             "blocked_progress": False, "recover_replan": False, "recover_hold_s": 0.0, "look360_m": 0.0}
 SWITCHES = {"A": ("near_known",), "B": ("spin_flip_deg", "spin_lead_s", "spin_accel"),
-            "D": ("blocked_s", "blocked_progress"), "C": ("recover_replan", "recover_hold_s")}
+            "D": ("blocked_s", "blocked_progress"), "C": ("recover_replan", "recover_hold_s"), "E": ("look360_m",)}
 DELAY = 4  # frames: commands reach the base ~0.46 s after their frame (the robot: 0.4-0.9 s)
 W_LAG_S = 0.2  # s, the yaw rate's first-order lag
 
@@ -186,10 +188,11 @@ def corridor():
     return np.vstack([outline, *clutter]), (0.5, 0.5, 0.0)
 
 
-def explore_corridor(switches, steps=2000, seed=1):
+def explore_corridor(switches, steps=2000, seed=1, trace=None):
     """The reference robot's navigator (loop.new_navigator) with these [explore] switches in the corridor: noisy
     ranges, the camera's blind zone (floor seen from 0.47 m), DELAY and W_LAG_S, commands capped as the runtime's
-    controller does (cap_speed to controller.v_max, w_max). Returns the metrics until finished (or `steps`)."""
+    controller does (cap_speed to controller.v_max, w_max). Returns the metrics until finished (or `steps`).
+    trace: a list to append (pose, state, full looks started so far) to at each step."""
     from navette import config
     from navette.runtime import loop
     from navette.runtime.controller import cap_speed
@@ -202,6 +205,8 @@ def explore_corridor(switches, steps=2000, seed=1):
 
     def step(t, dt, pose, scan, cam_h, a, v, w, v_prev):
         out = nav.step(t, dt, pose, Scan(**scan), cam_h, a, v, w, v_prev)
+        if trace is not None:
+            trace.append((pose, out.state, nav.full_looks))
         v, w = cap_speed(out.v, out.w, cfg.controller.v_max, cfg.controller.w_max)
         cmds.append((v, w))
         return SimpleNamespace(v=v, w=w, finished=out.finished, blind_stop=out.blind_stop)
@@ -210,7 +215,7 @@ def explore_corridor(switches, steps=2000, seed=1):
     n = len(cmds) if summary["finished_at"] is None else summary["finished_at"] + 1
     turns = [np.sign(w) for v, w in cmds[:n] if v == 0.0 and w != 0.0]  # in place
     return dict(reversals=int(sum(a != b for a, b in zip(turns, turns[1:]))), spin=len(turns) / n,
-                blocks=nav.blocks, free=int(nav.grid.masks()[1].sum()),
+                blocks=nav.blocks, looks=nav.full_looks, free=int(nav.grid.masks()[1].sum()),
                 finished_s=None if summary["finished_at"] is None else summary["finished_at"] * sim2d.DT,
                 collided=summary["collided"], min_clearance=summary["min_clearance"])
 
@@ -218,8 +223,9 @@ def explore_corridor(switches, steps=2000, seed=1):
 def test_exploration_switches_turn_less_in_a_cluttered_corridor_with_latency():
     """Off (the core's defaults, the prototype's behaviour) against on (the reference robot's config). Measured
     when this was written: reversals 8 -> 3, time turning in place 39 % -> 16 %, blocks 6 -> 0, free cells
-    4850 -> 4858, finished in 137 -> 171 s (on drives more: 17 m instead of 11), no collision."""
-    off, on = explore_corridor(PROTOTYPE), explore_corridor({})
+    4850 -> 4858, finished in 137 -> 171 s (on drives more: 17 m instead of 11), no collision. The full look
+    (look360_m) is left out here: its turns in place are on purpose (see the next test)."""
+    off, on = explore_corridor(PROTOTYPE), explore_corridor({"look360_m": 0.0})
     print(f"\noff {off}\non  {on}")
     assert not off["collided"] and not on["collided"]
     assert on["min_clearance"] > 0.13 + 0.05  # the collision monitor's clearance (radius + margin) held
@@ -227,6 +233,50 @@ def test_exploration_switches_turn_less_in_a_cluttered_corridor_with_latency():
     assert on["blocks"] < off["blocks"]
     assert on["free"] >= 0.95 * off["free"]
     assert off["finished_s"] is not None and on["finished_s"] is not None
+
+
+def full_looks(trace):
+    """The full looks of a trace of explore_corridor: per look, (m driven since the last one ended or the start,
+    deg turned from its start to its end)."""
+    looks, k, n = [], 0, len(trace)
+    driven, last = 0.0, trace[0][0]
+    while k < n:
+        pose, _, started = trace[k]
+        driven += np.hypot(pose[0] - last[0], pose[1] - last[1])
+        last = pose
+        if started > len(looks):  # this step started a look; it ends at step j, the first one out of LOOK
+            j = k + 1
+            while j < n - 1 and trace[j][1] == "LOOK":
+                j += 1
+            heading = np.unwrap([p[2] for p, _, _ in trace[k:j + 1]])
+            looks.append((driven, np.degrees(abs(heading[-1] - heading[0]))))
+            driven, last, k = 0.0, trace[j][0], j + 1  # the distance counts again from the step after the end
+            continue
+        k += 1
+    return looks
+
+
+def test_full_looks_every_look360_m_and_exploration_still_finishes():
+    """The reference robot's config (all its switches) without and with its full look (look360_m = 2.5), in the
+    corridor with latency. On: a look once look360_m has been driven since the last one (later if the robot is
+    then turning toward a goal: the look waits for DRIVE), each turning >= 360 deg (380 measured on the pose);
+    exploration still finishes, with no collision and the same coverage. Measured when this was written: 5 looks
+    every 2.50-2.51 m, 381 deg each; finished in 171 -> 193 s; free cells 4858 -> 4822; min clearance 0.30 ->
+    0.22 m. Seeds 1-7: 4-5 looks, +4 to +48 s (mean +21 s) to finish, no collision."""
+    from navette import config
+
+    look360_m = config.load(ROBOT_TOML).explore.look360_m
+    trace = []
+    off, on = explore_corridor({"look360_m": 0.0}), explore_corridor({}, trace=trace)
+    looks = full_looks(trace)
+    print(f"\noff {off}\non  {on}\nlooks (m driven, deg turned) "
+          f"{[(round(float(d), 2), round(float(a))) for d, a in looks]}")
+    assert look360_m > 0 and off["looks"] == 0 and on["looks"] == len(looks) >= 3
+    for driven, turned in looks:
+        assert look360_m <= driven < look360_m + 0.3, looks
+        assert turned >= 360.0, looks
+    assert not on["collided"] and on["min_clearance"] > 0.13 + 0.05
+    assert on["finished_s"] is not None and on["free"] >= 0.95 * off["free"]
 
 
 def forward_with_flicker(near_k, near_n, seed=3, p=0.3):

@@ -345,6 +345,12 @@ impl Navigator {
         self.explore.controller.blocks
     }
 
+    /// Full looks (`ExploreParams::look360_m`) started by the exploration behaviour since the start or the last
+    /// reset.
+    pub fn full_looks(&self) -> u32 {
+        self.explore.full_looks
+    }
+
     /// Forget the map and the behaviour's state: the robot was moved by hand, the old poses mean nothing.
     pub fn reset(&mut self) {
         let p = &self.params;

@@ -337,6 +337,7 @@ impl PyFrontierPlanner {
 ///   scan     the last scan: its image-bottom sectors for the planner, the side of the recovery turn
 ///   recover  fixed-frame heading (rad) of the recovery turn in progress, or None
 ///   fails    blocks on the current target
+///   full_looks  full looks (ExploreParams.look360_m) started so far
 #[pyclass(name = "FrontierExplore", module = "navette")]
 pub struct PyFrontierExplore {
     inner: FrontierExplore,
@@ -429,6 +430,11 @@ impl PyFrontierExplore {
     #[getter]
     fn fails(&self) -> u32 {
         self.inner.goals.fails()
+    }
+
+    #[getter]
+    fn full_looks(&self) -> u32 {
+        self.inner.full_looks
     }
 
     /// Plan from pose, with the image-bottom obstacles of the last scan.

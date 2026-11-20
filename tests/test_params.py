@@ -111,7 +111,7 @@ EXPLORE_BAD = [("v_set", []), ("v_set", [0.1, 0.0]), ("v_set", [-0.1]), ("v_set"
                ("spin_done_deg", -1.0), ("moving_v", -0.05), ("moving_v", NAN),
                ("spin_flip_deg", -1.0), ("spin_lead_s", NAN), ("spin_accel", -0.1), ("spin_w_min", 0.0),
                ("spin_w_min", INF), ("progress_m", -0.05), ("progress_deg", NAN),
-               ("recover_hold_s", -1.0)]
+               ("recover_hold_s", -1.0), ("look360_m", -1.0), ("look360_m", NAN)]
 
 
 @pytest.mark.parametrize("key, value", EXPLORE_BAD)

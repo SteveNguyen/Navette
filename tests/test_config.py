@@ -36,6 +36,7 @@ def test_reachy_poussah_values():
     assert (cfg.explore.blocked_s, cfg.explore.blocked_progress, cfg.explore.progress_m, cfg.explore.progress_deg) == (
         3.0, True, 0.05, 17.0)
     assert (cfg.explore.recover_replan, cfg.explore.recover_hold_s) == (False, 0.0)  # C off: unproven
+    assert cfg.explore.look360_m == 2.5  # a full look every 2.5 m driven: complete views for the SLAM submaps
     # near persistence: the floor model's single-frame flicker at the image bottom (the core's default: 1 of 1)
     assert (cfg.perception.near_k, cfg.perception.near_n) == (2, 3)
     assert cfg.teleop.timeout_s == 0.5  # operator dead-man of the phone joystick
@@ -100,6 +101,9 @@ def edited(tmp_path, old, new, count=1):
     (r"^blocked_s = 3.0$", "blocked_s = inf", r"\[explore\] blocked_s = inf"),
     (r"^recover_replan = false$", "", r"\[explore\]: missing \[.recover_replan.\]"),
     (r"^recover_hold_s = 0.0$", "recover_hold_s = -2.0", r"\[explore\] recover_hold_s = -2.0: must be finite and >= 0"),
+    (r"^look360_m = 2.5$", "", r"\[explore\]: missing \['look360_m'\]"),
+    (r"^look360_m = 2.5$", "look360_m = -1.0", r"\[explore\] look360_m = -1.0: must be finite and >= 0"),
+    (r"^look360_m = 2.5$", "look360_m = true", r"\[explore\] look360_m = True: expected float"),
     # ranges: the key is named
     (r"^decel = 0.64$", "decel = 0.0", r"\[safety\] decel = 0.0: must be finite and > 0"),
     (r"^step = 0.02$", "step = 0", r"\[safety\] step = 0: must be finite and > 0"),

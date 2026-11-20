@@ -189,6 +189,14 @@ inputs the prototype handled unsafely, and on purpose:
     heading is replaced by the recovery heading. The prototype turned 90 deg toward the freer side, then the
     replan pointed back to the blocked way and the robot turned back. The second block on a target still
     bans it.
+  - Full look, `look360_m` (`exploration/frontier_explore.rs`): once `look360_m` has been driven since the last
+    one (or the start), the robot stops and turns 380 deg in place in one direction (toward its goal), state
+    LOOK, at the turns' rates (`w_spin`, slowed by `spin_accel`); the angle is measured on the pose, with a
+    time limit of 380 deg / `spin_w_min` if the base does not follow. It waits while the robot turns toward a
+    goal (SPIN) or recovers, and never replaces the no-frontier look-around. Why: the SLAM front end makes a
+    submap from each turn in place, and the robot's turns spanned 60-260 deg, never a full circle
+    (docs/SLAM.md); a full turn sees all around (camera ~70 deg). Reference robot: every 2.5 m; in the 2-D
+    corridor with latency, 4-5 looks per exploration, ~+21 s (of ~165 s) to finish, same coverage.
 - **Runtime** (`runtime/up.py`, `runtime/loop.py`): no navigation step without a finite 'up', a finite
   odometry and a finite camera height above the floor; the stale-perception watchdog then halts a drive.
 - **Parameters**: invalid values are refused (the prototype looped for ever on an arc step of 0).

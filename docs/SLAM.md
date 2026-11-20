@@ -149,7 +149,8 @@ no false loop closure. Recorded runs (9-17 m): almost no correction, for three r
 match score counted the parts of a view the reference never saw.
 
 Roadmap:
-1. Explorer: an occasional full 360 deg look (behind a parameter, on in the robot config). In progress.
+1. Explorer: an occasional full 360 deg look (`[explore] look360_m`, 0 = off in the core; the robot config: a
+   380 deg turn in place every 2.5 m driven). Done; to check on the robot that its submaps match.
 2. Matcher: score only what the reference has observed. In progress.
 3. Ground truth on the robot: AprilTags lying on the floor at tape-measured positions, one longer multi-room run
    (needs the floor model to cross doorsteps); calibrate the odometry noise model; measure SLAM vs odometry.

@@ -42,6 +42,8 @@ use crate::scan::PyScan;
 ///                    blocked direction: 90 deg the way of the previous turn in place); False: 90 deg toward
 ///                    the side with more free floor in view (the prototype)
 ///   recover_hold_s   s, after that recovery the goal does not turn back toward the blocked direction (0: no hold)
+///   look360_m        m, exploration: after driving this far since the last full look, turn in place a full
+///                    circle (380 deg) in one direction, for a complete local view; 0: never (the prototype)
 /// ValueError on an invalid value (an empty v_set or a speed <= 0 in it, n_w = 0, clear_cap, w_spin or
 /// spin_w_min <= 0,
 /// a negative or non-finite value): at construction, and where the parameters are used (the attributes can
@@ -73,6 +75,7 @@ pub struct PyExploreParams {
     progress_deg: f64,
     recover_replan: bool,
     recover_hold_s: f64,
+    look360_m: f64,
 }
 
 impl PyExploreParams {
@@ -103,6 +106,7 @@ impl PyExploreParams {
             progress_deg: self.progress_deg,
             recover_replan: self.recover_replan,
             recover_hold_s: self.recover_hold_s,
+            look360_m: self.look360_m,
         };
         p.validate().map_err(param_err)?;
         Ok(p)
@@ -134,6 +138,7 @@ impl PyExploreParams {
             progress_deg: p.progress_deg,
             recover_replan: p.recover_replan,
             recover_hold_s: p.recover_hold_s,
+            look360_m: p.look360_m,
         }
     }
 }
@@ -145,7 +150,8 @@ impl PyExploreParams {
                         k_speed=0.3, clear_cap=1.0, spin_above_deg=70.0, spin_done_deg=20.0, w_spin=1.0,
                         blocked_s=1.0, rotate_in_place=false, moving_v=0.05, near_known=false, spin_flip_deg=0.0,
                         spin_lead_s=0.0, spin_accel=0.0, spin_w_min=0.3, blocked_progress=false,
-                        progress_m=0.05, progress_deg=17.0, recover_replan=false, recover_hold_s=0.0))]
+                        progress_m=0.05, progress_deg=17.0, recover_replan=false, recover_hold_s=0.0,
+                        look360_m=0.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         v_set: Vec<f64>,
@@ -172,6 +178,7 @@ impl PyExploreParams {
         progress_deg: f64,
         recover_replan: bool,
         recover_hold_s: f64,
+        look360_m: f64,
     ) -> PyResult<Self> {
         let p = Self {
             v_set,
@@ -198,6 +205,7 @@ impl PyExploreParams {
             progress_deg,
             recover_replan,
             recover_hold_s,
+            look360_m,
         };
         p.to_core()?;
         Ok(p)
@@ -209,7 +217,8 @@ impl PyExploreParams {
              k_speed={:?}, clear_cap={:?}, spin_above_deg={:?}, spin_done_deg={:?}, w_spin={:?}, \
              blocked_s={:?}, rotate_in_place={}, moving_v={:?}, near_known={}, spin_flip_deg={:?}, \
              spin_lead_s={:?}, spin_accel={:?}, spin_w_min={:?}, blocked_progress={}, \
-             progress_m={:?}, progress_deg={:?}, recover_replan={}, recover_hold_s={:?})",
+             progress_m={:?}, progress_deg={:?}, recover_replan={}, recover_hold_s={:?}, \
+             look360_m={:?})",
             self.v_set,
             self.w_max,
             self.n_w,
@@ -233,7 +242,8 @@ impl PyExploreParams {
             self.progress_m,
             self.progress_deg,
             if self.recover_replan { "True" } else { "False" },
-            self.recover_hold_s
+            self.recover_hold_s,
+            self.look360_m
         )
     }
 }
