@@ -52,8 +52,9 @@ near_n = 3
 # Height above the floor of the frame the SDK gives the head pose in, Mini on the base. That frame is the URDF's
 # root frame (bottom of the Mini's foot) raised by the SDK's head_z_offset, 0.177 m; plus 0.04 m, the base's seat
 # (measured). The camera's height adds the head pose (kinematics) and the hand-eye transform, taken along the
-# IMU's 'up': ~0.27 m at the navigation pose. Checked with a tape, Mini on the floor at the navigation pose: lens
-# centre ~0.215 m, computed 0.220. (A hand-eye fit against a floor grid gave 0.215 instead of 0.177, ~4 cm off:
+# IMU's 'up': ~0.27 m at the navigation pose. Checked on the floor (2026-11-20, Mini on the floor, navigation
+# pose): lens centre ~0.215 m by tape, computed 0.220; a door's base at 0.5 / 1.0 / 1.5 m (tape, +-2 cm) projects
+# to 0.50 / 1.02 / 1.50 m. (A hand-eye fit against a floor grid gave 0.215 instead of 0.177: 0.59 / 1.19 / 1.77 m,
 # not used. Runs up to 2026-11-19 used 0.325, a guess: camera ~0.38 m, scan distances ~40% too long.)
 body_z = 0.217
 # Radius around the robot the camera cannot see at its navigation pose (the closest visible floor is at
