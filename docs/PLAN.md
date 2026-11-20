@@ -158,6 +158,21 @@ inputs the prototype handled unsafely, and on purpose:
   On the robot the floor model is bi-stable on a doormat and makes single-frame false patches near an open
   door, which stopped or blocked the robot. Cost: k - 1 frames of delay on a real obstacle filling the image
   bottom (one frame, ~0.12 s, <= 2 cm at 0.15 m/s with 2 of 3), inside the margin.
+- **Floor in two frames** (`navigator.rs`, `TwoFrameFloor`, `floor_two_frames`; off by default so the goldens are
+  unchanged, and off in the reference robot's config too: optional, `[perception]`): a sector's free distance
+  stops at an obstacle the previous scan saw (its obstacle points kept in the fixed frame, so the motion is
+  taken out), where this scan claims floor (between its closest visible point and its free distance, 5 cm
+  tolerance); elsewhere the old point is dropped. Only the raw previous scan is used: no obstacle carries over
+  more than one frame. Against one-frame "phantom floor" over a real obstacle (measured flicker:
+  `docs/FLICKER.md`). Cost: free space one frame later, obstacles not delayed; a doorway the floor model
+  hesitates on looks blocked more often. `Navigator.floor_cut`: sectors shortened at the last step.
+- **Pose at the capture time** (`runtime/localization.py`, `OdometryLocalization(at_capture)`,
+  `[perception] pose_at_capture`; false keeps the prototype's pose, the latest odometry when the frame arrives;
+  the reference robot: true). The odometry is read once per frame, at its arrival, one camera latency after the
+  capture (38 ms, `adapter.camera_latency_s`): ~1 deg of heading at the base's turn rate on every scan. The pose
+  is the linear interpolation of the last two reads (receive-stamped) at `Frame.t`, never extrapolated.
+  Measured on recorded runs: consecutive frames align best on the floor with the poses ~40 ms earlier
+  (`docs/FLICKER.md`).
 - **Teleop behaviour** (`navigator.rs`, `Behaviour::Teleop`; new, the prototype had none): the request is the
   operator's (`Navigator::set_request`, the phone page's joystick through the runtime), and goes through the
   collision monitor, the resume gate, the controller's caps and every watchdog like a planner's; (0, 0) once

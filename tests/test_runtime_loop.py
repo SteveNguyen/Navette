@@ -208,6 +208,34 @@ def test_localization_is_the_odometry_pose():
     assert loc.pose() is None
 
 
+def test_localization_at_capture_interpolates_the_last_two_reads():
+    from navette.interfaces import Odometry
+
+    # default: the latest odometry whatever the capture time (the prototype's)
+    loc = OdometryLocalization()
+    loc.update(Odometry(1.0, 0.0, 0.0, 0.0, 0.1, 0.0), 0.9)
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.06)
+    assert loc.pose() == (0.1, 0.0, 0.2)
+    loc = OdometryLocalization(at_capture=True)
+    loc.update(Odometry(1.0, 0.0, 0.0, 0.0, 0.1, 0.0), 0.96)
+    assert loc.pose() == (0.0, 0.0, 0.0)  # one sample: it, whatever the time
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.06)  # captured 40 ms before the read
+    assert loc.pose() == pytest.approx((0.06, 0.0, 0.12))
+    loc.update(Odometry(1.1, 0.1, 0.0, 0.2, 0.1, 0.0), 1.2)  # the same sample read again; capture after it
+    assert loc.pose() == (0.1, 0.0, 0.2)  # not extrapolated
+    # heading across +-pi: the short way round
+    loc.update(Odometry(1.2, 0.1, 0.0, math.pi - 0.1, 0.0, 1.0), 1.2)
+    loc.update(Odometry(1.3, 0.1, 0.0, -math.pi + 0.1, 0.0, 1.0), 1.25)
+    assert math.remainder(loc.pose()[2] - math.pi, math.tau) == pytest.approx(0.0, abs=1e-12)
+    # before the older sample: the older one
+    loc.update(Odometry(1.4, 0.2, 0.0, 0.0, 0.0, 0.0), 1.0)
+    assert loc.pose() == pytest.approx((0.1, 0.0, -math.pi + 0.1))
+    loc.update(None, 1.5)  # no odometry: no pose, and the history is dropped
+    assert loc.pose() is None
+    loc.update(Odometry(2.0, 1.0, 1.0, 1.0, 0.0, 0.0), 1.9)
+    assert loc.pose() == (1.0, 1.0, 1.0)
+
+
 def test_base_motion_low_passes_the_acceleration():
     from navette.interfaces import Odometry
 
@@ -247,9 +275,12 @@ def test_reachy_config_gives_the_core_defaults_exactly():
     assert nav.safety == p["safety"] and (nav.behaviour, nav.forward_v) == ("explore", 0.15)
     assert (nav.resume_n, nav.resume_margin) == (4, 0.10)
     assert (nav.near_k, nav.near_n) == (2, 3)  # near persistence on (floor-model flicker)
+    assert nav.floor_two_frames is False  # optional, off in the robot's config too
+    assert loop.new_navigator(cfg.replace("perception", floor_two_frames=True), "explore", 0.15, True).floor_two_frames
     core = navette.Navigator()
     assert (core.resume_n, core.resume_margin) == (2, 0.0)
     assert (core.near_k, core.near_n) == (1, 1)
+    assert core.floor_two_frames is False and core.floor_cut == 0
 
 
 def test_a_bigger_slower_robot_gets_its_own_geometry_and_speeds():

@@ -55,8 +55,9 @@ MASK_SHAPE = (192, 320)  # the reference robot's floor masks
 PROTOTYPE_EXPLORE = {"near_known": False, "spin_flip_deg": 0.0, "spin_lead_s": 0.0, "spin_accel": 0.0,
                      "blocked_s": 1.0, "blocked_progress": False,
                      "recover_replan": False, "recover_hold_s": 0.0}
-# the [perception] near persistence at the core's default (1 of 1: off)
-PROTOTYPE_PERCEPTION = {"near_k": 1, "near_n": 1}
+# the [perception] near persistence at the core's default (1 of 1: off), and the prototype's pose (the latest
+# odometry when the frame arrived) and scan (no floor in two frames)
+PROTOTYPE_PERCEPTION = {"near_k": 1, "near_n": 1, "pose_at_capture": False, "floor_two_frames": False}
 
 
 def runs(frames):

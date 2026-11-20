@@ -3,6 +3,8 @@
 //! Per frame, in this order:
 //!
 //! ```text
+//! two frames   TwoFrameFloor::apply: floor counts as free only if the previous scan saw no obstacle there
+//!              (fixed frame); every step below sees the shortened scan               (off by default)
 //! near filter  NearFilter::apply: a near sector counts only if near in near_k of the last near_n scans
 //!              (fixed-frame bearings); every step below sees the filtered flags   (off by default)
 //! tilt trust   TiltTrust::update(dt, a, v, w) from the base motion; trusted range for the map
@@ -38,6 +40,11 @@
 //! clearance radius) counts only if that bearing was near in at least `near_k` of the last `near_n` scans.
 //! The floor model flickers: single-frame false "not floor" patches at the image bottom (a bi-stable doormat,
 //! tiles near an open door) stopped or blocked the robot, while the map averages them out over time.
+//!
+//! Another, active only with `floor_two_frames` (off by default): floor in two frames ([`TwoFrameFloor`]).
+//! The floor model also flickers the other way: a one-frame "floor" over a real obstacle. A floor point then
+//! counts as free only if the previous frame did not see an obstacle there: free space appears one frame later,
+//! obstacles at once.
 
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
@@ -99,6 +106,9 @@ pub struct NavigatorParams {
     /// `near_n` scans, this one included. 1 <= near_k <= near_n; near_k = 1: no filter (the prototype).
     pub near_k: u32,
     pub near_n: u32,
+    /// Floor in two frames ([`TwoFrameFloor`]): the scan's free distance stops at the previous scan's
+    /// obstacles. false: the scan as given (the prototype).
+    pub floor_two_frames: bool,
     /// Teleop: the operator's request holds this long (s) after it was set, measured on the step's `t`; then
     /// (0, 0) until the next one.
     pub teleop_timeout_s: f64,
@@ -120,6 +130,7 @@ impl Default for NavigatorParams {
             forward_v: 0.15,
             near_k: 1,
             near_n: 1,
+            floor_two_frames: false,
             teleop_timeout_s: 0.5,
             grid: OccupancyGridParams::default(),
             frontier: FrontierParams::default(),
@@ -257,6 +268,79 @@ fn near_around(near: &[bool], bearing_deg: f64) -> bool {
     (-1..=1).any(|d| near[(j + d).rem_euclid(m) as usize])
 }
 
+/// Floor in two frames: a scan sector's free distance stops at an obstacle the previous scan saw, so a point
+/// counts as free floor only if both frames called it floor. Against one-frame "phantom floor" (the floor
+/// model calling a real obstacle floor in a single frame): measured on recorded runs, the mask flips between
+/// consecutive frames on 0.6 % of its pixels away from edges (doorway thresholds, rugs, shadows, wall bottoms).
+///
+/// The previous scan's obstacles are kept as points in the fixed frame (sector centre, at the obstacle
+/// distance; finite ones in seen sectors only), so the robot's motion between the frames is taken out. A point
+/// shortens the sector of this scan it falls in only where this scan claims floor: between its closest visible
+/// point and its free distance (`Scan::free`). Elsewhere this frame says nothing about it (blind zone below
+/// the image, behind an obstacle, out of the view) and the point is dropped: this is not a memory of
+/// obstacles, the map is. Only the raw previous scan is used (not the shortened one), so an obstacle does not
+/// carry over more than one frame.
+///
+/// Cost: a free distance grows one frame later (~0.12 s at the robot's ~8 Hz); obstacles are not delayed. A
+/// region where the model hesitates between floor and obstacle (a doorway threshold) looks blocked more often.
+/// The shortened sectors are not flagged `near` (the obstacle is where the previous frame saw it).
+/// A previous obstacle shortens a sector only if it is at least this much (m) nearer than the sector's free
+/// distance (the scan's range resolution: a few cm at 1-2 m).
+pub const TWO_FRAME_TOL_M: f64 = 0.05;
+
+#[derive(Clone, Debug, Default)]
+pub struct TwoFrameFloor {
+    /// The previous scan's obstacle points (fixed frame).
+    prev: Vec<Point2>,
+    /// Sectors the last apply shortened.
+    cut: usize,
+}
+
+impl TwoFrameFloor {
+    /// `scan` (taken at `pose`, fixed frame; bearings relative to pose.theta) with each sector's obstacle
+    /// distance cut at the previous scan's obstacles; `scan`'s own obstacles become the previous ones.
+    pub fn apply(&mut self, pose: Pose2, scan: &Scan) -> Scan {
+        let mut out = scan.clone();
+        let free = scan.free();
+        let m = scan.len();
+        let mut shortened = vec![false; m];
+        for p in &self.prev {
+            let (dx, dy) = (p[0] - pose.x, p[1] - pose.y);
+            let r = dx.hypot(dy);
+            let bearing = (dy.atan2(dx) - pose.theta).to_degrees();
+            // sectors: the full circle in equal sectors from -180 deg, as FreeSpace makes them
+            let j = ((ieee_remainder(bearing, 360.0) + 180.0) / (360.0 / m as f64)).floor() as i64;
+            let j = j.rem_euclid(m as i64) as usize;
+            // free[j] is NaN where not seen: the comparison is then false. The tolerance: a persistent obstacle
+            // projects back a little in front of itself (sector centre vs nearest point in the sector)
+            if scan.seen[j] && r >= scan.closest[j] && r < free[j] - TWO_FRAME_TOL_M && r < out.obstacle[j] {
+                out.obstacle[j] = r;
+                shortened[j] = true;
+            }
+        }
+        self.cut = shortened.iter().filter(|&&s| s).count();
+        self.prev = (0..m)
+            .filter(|&k| scan.seen[k] && scan.obstacle[k].is_finite())
+            .map(|k| {
+                let a = pose.theta + scan.bearing_deg[k].to_radians();
+                let r = scan.obstacle[k];
+                [pose.x + r * a.cos(), pose.y + r * a.sin()]
+            })
+            .collect();
+        out
+    }
+
+    /// Sectors the last [`Self::apply`] shortened.
+    pub fn cut(&self) -> usize {
+        self.cut
+    }
+
+    pub fn reset(&mut self) {
+        self.prev.clear();
+        self.cut = 0;
+    }
+}
+
 pub struct Navigator {
     params: NavigatorParams,
     /// The map is used: always by Explore, by Forward and Teleop only with odometry.
@@ -266,6 +350,7 @@ pub struct Navigator {
     tilt_trust: TiltTrust,
     gate: ResumeGate,
     near_filter: NearFilter,
+    two_frames: TwoFrameFloor,
     /// The near flags the last step used (after the near filter).
     near: Vec<bool>,
     /// Teleop: the operator's last request (v, w, t set).
@@ -287,6 +372,7 @@ impl Navigator {
             tilt_trust: params.tilt_trust,
             gate: ResumeGate::new(params.resume_n),
             near_filter: NearFilter::new(params.near_k, params.near_n),
+            two_frames: TwoFrameFloor::default(),
             near: Vec::new(),
             request: None,
             heading0: None,
@@ -310,6 +396,11 @@ impl Navigator {
     /// empty before the first step.
     pub fn near(&self) -> &[bool] {
         &self.near
+    }
+
+    /// Scan sectors the floor-in-two-frames rule shortened at the last step (0 when it is off).
+    pub fn floor_cut(&self) -> usize {
+        self.two_frames.cut()
     }
 
     pub fn params(&self) -> &NavigatorParams {
@@ -354,6 +445,7 @@ impl Navigator {
         self.tilt_trust = p.tilt_trust;
         self.gate = ResumeGate::new(p.resume_n);
         self.near_filter.reset();
+        self.two_frames.reset();
         self.near.clear();
         self.request = None;
         (self.heading0, self.done_since) = (None, None);
@@ -377,7 +469,15 @@ impl Navigator {
     ) -> NavOut {
         let sp = &{ self.params.safety }; // a copy: `self` is borrowed mutably below
 
-        // near persistence first, so that the map's blind check, the behaviour and the collision monitor all
+        // floor in two frames first: every part of the step, the map included, sees the shortened scan
+        let confirmed;
+        let scan = if self.params.floor_two_frames {
+            confirmed = self.two_frames.apply(pose, scan);
+            &confirmed
+        } else {
+            scan
+        };
+        // near persistence next, so that the map's blind check, the behaviour and the collision monitor all
         // see the same near flags (skipped with near_k = 1: the scan as given)
         let filtered;
         let scan = if self.params.near_k > 1 {
@@ -1002,6 +1102,80 @@ mod tests {
             let err = Navigator::new(p).err().unwrap().0;
             assert!(err.starts_with("NavigatorParams.near_k"), "{err}");
         }
+    }
+
+    #[test]
+    fn two_frame_floor_cuts_free_space_at_the_previous_obstacles() {
+        let ahead = 90; // bearing +1 deg
+        let mut f = TwoFrameFloor::default();
+        let at = Pose2::new(0.0, 0.0, 0.0);
+        // first scan: nothing before it, unchanged
+        assert_eq!(f.apply(at, &wall_scan(1.0)), wall_scan(1.0));
+        assert_eq!(f.cut(), 0);
+        // one frame of phantom floor up to 2 m: free space stops where the previous frame saw the wall
+        let s = f.apply(at, &wall_scan(2.0));
+        assert!((s.obstacle[ahead] - wall_scan(1.0).obstacle[ahead]).abs() < 1e-9);
+        assert!((s.free()[ahead] - wall_scan(1.0).free()[ahead]).abs() < 1e-9);
+        // the whole seen wall (sectors within 55 deg)
+        assert!(f.cut() > 40);
+        // the next frame compares with the raw 2 m scan only: the 1 m wall does not carry over
+        assert_eq!(f.apply(at, &wall_scan(2.0)), wall_scan(2.0));
+        assert_eq!(f.cut(), 0);
+        // obstacles are immediate: a nearer obstacle now is kept as it is
+        assert_eq!(f.apply(at, &wall_scan(0.5)), wall_scan(0.5));
+    }
+
+    #[test]
+    fn two_frame_floor_takes_out_the_motion_and_ignores_what_this_frame_does_not_see() {
+        let ahead = 90;
+        // driven 0.3 m forward: the wall seen 1 m ahead is now 0.7 m ahead
+        let mut f = TwoFrameFloor::default();
+        f.apply(Pose2::new(0.0, 0.0, 0.0), &wall_scan(1.0));
+        let s = f.apply(Pose2::new(0.3, 0.0, 0.0), &wall_scan(2.0));
+        assert!((s.obstacle[ahead] - 0.7 / 1f64.to_radians().cos()).abs() < 0.02);
+        let mut f = TwoFrameFloor::default();
+        f.apply(Pose2::new(0.0, 0.0, 0.0), &wall_scan(1.0));
+        // turned around: the old wall is behind, out of this scan's view (55 deg), dropped
+        let s = f.apply(Pose2::new(0.0, 0.0, PI), &wall_scan(2.0));
+        assert_eq!(s, wall_scan(2.0));
+        // an obstacle in this frame's blind zone (nearer than its closest visible point) is not this frame's
+        // floor: dropped
+        let mut f = TwoFrameFloor::default();
+        f.apply(Pose2::new(0.0, 0.0, 0.0), &wall_scan(1.0));
+        let mut blind = wall_scan(2.0);
+        // (the old wall's points are at most 1 / cos 55 deg = 1.74 m away)
+        blind.closest.iter_mut().for_each(|c| *c = c.max(1.8));
+        assert_eq!(f.apply(Pose2::new(0.0, 0.0, 0.0), &blind), blind);
+        // reset forgets the previous scan
+        let mut f = TwoFrameFloor::default();
+        f.apply(Pose2::new(0.0, 0.0, 0.0), &wall_scan(1.0));
+        f.reset();
+        let at = Pose2::new(0.0, 0.0, 0.0);
+        assert_eq!(f.apply(at, &wall_scan(2.0)), wall_scan(2.0));
+    }
+
+    #[test]
+    fn floor_two_frames_is_off_by_default_and_shortens_the_navigator_s_scan_when_on() {
+        let pose = Pose2::new(0.0, 0.0, 0.0);
+        let run = |on: bool| {
+            let mut nav = Navigator::new(NavigatorParams {
+                behaviour: Behaviour::Forward,
+                odometry: false,
+                resume_n: 1,
+                floor_two_frames: on,
+                ..Default::default()
+            })
+            .unwrap();
+            // an obstacle 0.15 m ahead for one frame, then a phantom floor frame
+            nav.step(0.0, 0.1, pose, &wall_scan(0.15), 0.35, 0.0, 0.0, 0.0, 0.0);
+            let out = nav.step(0.1, 0.1, pose, &wall_scan(2.0), 0.35, 0.0, 0.0, 0.0, 0.0);
+            (out.v, nav.floor_cut())
+        };
+        assert!(!NavigatorParams::default().floor_two_frames);
+        let (v_off, cut_off) = run(false);
+        let (v_on, cut_on) = run(true);
+        assert!(v_off > 0.0 && cut_off == 0);
+        assert!(v_on < v_off && cut_on > 0, "{v_on} {v_off} {cut_on}");
     }
 
     fn teleop(odometry: bool) -> Navigator {

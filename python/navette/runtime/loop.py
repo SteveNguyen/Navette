@@ -216,8 +216,9 @@ def navigator_params(cfg):
 
 def new_navigator(cfg, behaviour, forward_v, odometry):
     """A navette.Navigator for a robot config (navigator_params) with its resume gate (resume_n, and the
-    restart hysteresis resume_margin), its near persistence (perception.near_k of near_n) and the teleop
-    operator's dead-man (teleop.timeout_s). The single place where the runtime builds one."""
+    restart hysteresis resume_margin), its near persistence (perception.near_k of near_n), floor in two frames
+    (perception.floor_two_frames) and the teleop operator's dead-man (teleop.timeout_s). The single place where
+    the runtime builds one."""
     import navette
 
     p = navigator_params(cfg)
@@ -225,6 +226,7 @@ def new_navigator(cfg, behaviour, forward_v, odometry):
                              forward_v=forward_v, grid=navette.OccupancyGrid(**p["grid"]), frontier=p["frontier"],
                              explore=p["explore"], resume_margin=cfg.behaviour.resume_margin,
                              near_k=cfg.perception.near_k, near_n=cfg.perception.near_n,
+                             floor_two_frames=cfg.perception.floor_two_frames,
                              teleop_timeout_s=cfg.teleop.timeout_s)
 
 
@@ -307,7 +309,7 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
         steps_w = csv.writer(steps_f)
         steps_w.writerow(STEP_COLS + LIVE_COLS + ATT_COLS)
         up = LiveUp(make_up_filter, cfg.perception.up_g_s, cfg.perception.imu_max_age_s)
-        loc = OdometryLocalization()
+        loc = OdometryLocalization(cfg.perception.pose_at_capture)
         # odometry moves the pose only with a base that drives: not without a base, nor in a dry run (the robot
         # is carried while the base's wheels stay still: the map would smear)
         odometry = base is not None and not dry_run
@@ -333,10 +335,11 @@ def run(robot, cfg, out_dir, stop_event, make_navigator, make_up_filter=default_
                 warning = camera_mount_warning(frame.T_base_cam, cfg.footprint.radius)
                 if warning:
                     log(warning)
-            # the base right now: the pose of this frame (a frame late by the camera's lag: 6 mm at 0.15 m/s)
+            # the base right now: the pose of this frame, at its capture time with perception.pose_at_capture
+            # (else late by the camera's lag: 6 mm at 0.15 m/s, ~1 deg turning)
             odom = finite_odometry(base.odometry()) if base is not None else \
                 itf.Odometry(frame.t, 0.0, 0.0, 0.0, 0.0, 0.0)
-            loc.update(odom)
+            loc.update(odom, frame.t)
             in_read = sum(frame.ms.values())  # the adapter's own stages inside read()
             wait_ms, w0 = (w1 - w0) * 1e3 - in_read, None
             t = frame.t

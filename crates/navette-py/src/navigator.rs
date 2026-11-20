@@ -104,11 +104,15 @@ impl PyNavOut {
 ///               margin); 0 = none
 ///   near_k, near_n  near persistence: a sector is near only if near in at least near_k of the last near_n
 ///               scans (bearings compared in the fixed frame); 1 of 1 = no filter
+///   floor_two_frames  floor in two frames: a sector's free distance stops at an obstacle the previous scan saw
+///               (fixed frame), so free floor appears one frame later and obstacles at once; False = the scan
+///               as given
 ///   teleop_timeout_s  s, teleop: the operator's request holds this long after it was set; then (0, 0)
 /// Attributes: grid; frontier (N, 2), path (N, 2) or None, target (2,) or None: the planner's frontier cell
 /// centres, path and target in the fixed frame, for display; near: the near flags the last step used (after
 /// the near filter; empty before the first step); safety, behaviour, odometry, resume_n, forward_v,
-/// resume_margin, near_k, near_n, teleop_timeout_s as given; blocks: recovery turns started so far.
+/// resume_margin, near_k, near_n, floor_two_frames, teleop_timeout_s as given; blocks: recovery turns started
+/// so far; floor_cut: sectors the floor-in-two-frames rule shortened at the last step.
 /// ValueError if a parameter is invalid (the parameter objects are checked again here: their attributes can
 /// be set after they were built).
 /// Threads: step, step_mask and observe release the GIL while they work (a plan on a large map takes a
@@ -149,7 +153,7 @@ impl PyNavigator {
     #[new]
     #[pyo3(signature = (safety=None, behaviour="explore", odometry=true, resume_n=2, forward_v=0.15, grid=None,
                         frontier=None, explore=None, tilt_trust=None, resume_margin=0.0, near_k=1, near_n=1,
-                        teleop_timeout_s=0.5))]
+                        teleop_timeout_s=0.5, floor_two_frames=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -166,6 +170,7 @@ impl PyNavigator {
         near_k: u32,
         near_n: u32,
         teleop_timeout_s: f64,
+        floor_two_frames: bool,
     ) -> PyResult<Self> {
         let behaviour = match behaviour {
             "explore" => Behaviour::Explore,
@@ -197,6 +202,7 @@ impl PyNavigator {
             forward_v,
             near_k,
             near_n,
+            floor_two_frames,
             teleop_timeout_s,
             // the navigator's own grid only stands in for the Python object's between calls: one cell
             grid: OccupancyGridParams {
@@ -294,6 +300,17 @@ impl PyNavigator {
     #[getter]
     fn near_n(&self) -> u32 {
         self.inner.params().near_n
+    }
+
+    #[getter]
+    fn floor_two_frames(&self) -> bool {
+        self.inner.params().floor_two_frames
+    }
+
+    /// Scan sectors the floor-in-two-frames rule shortened at the last step (0 when it is off).
+    #[getter]
+    fn floor_cut(&self) -> usize {
+        self.inner.floor_cut()
     }
 
     /// The near flags the last step used (after the near filter); empty before the first step.

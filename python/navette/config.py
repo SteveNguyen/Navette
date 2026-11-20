@@ -47,6 +47,10 @@ class Perception:
     up_g_s: float          # s of IMU samples used to measure |g| before the attitude filter starts
     near_k: int            # near persistence: a scan sector's 'near' flag (obstacle filling the image bottom)
     near_n: int            # counts only if near in near_k of the last near_n scans; 1 of 1 = off (the core default)
+    floor_two_frames: bool  # free floor only where the previous frame saw no obstacle (Navigator floor_two_frames);
+    #                         false: the scan as given (the core default)
+    pose_at_capture: bool  # a frame's pose: the odometry interpolated at its capture time (Frame.t); false: the
+    #                        latest odometry when the frame arrived (OdometryLocalization)
 
 
 @dataclass(frozen=True)
