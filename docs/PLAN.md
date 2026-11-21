@@ -220,3 +220,62 @@ live loop. The planner's search stops once every frontier cell is settled: same 
 | 6 | On the robot: conformance checks, timing, then the staged live tests again | needs a go | not started |
 
 Phases 1 and 3 ran in parallel after phase 0.
+
+## Future work (not started)
+
+### Antennas as bumper sensors
+
+Idea: the antennas are touched first when the robot drives under something low (low table, sofa or bed edge,
+chair rail): the floor model only sees where things touch the floor, and its "under" output is weak. A
+deflected antenna would stop the robot, back it off and mark the overhang in the map.
+
+Facts (sources: the Reachy Mini SDK, local clone at commit 25756e7042, 2026-11-04; Navette's adapter; our runs):
+- The antennas are Feetech servos in position mode (`assets/config/hardware_config.yaml`: `right_antenna` id 17,
+  `left_antenna` id 18, operating mode 3, P = 200). The daemon has no torque or current control for them
+  ("Antenna torque control is not supported with feetech motors", `daemon/backend/robot/backend.py`) and
+  exposes no load / current reading: **the only signal is the measured position**.
+- The daemon reads all motor positions at 50 Hz (`control_loop_frequency`). Navette already records them
+  (`state.jsonl`, kind `joints`, ~39 Hz in practice) and already uses them: `antenna_loop` in
+  `robots/reachy_poussah/robot.py` polls at 20 Hz and sends a STOP when an antenna is pushed more than 0.4 rad
+  (~23 deg) from rest (the operator's stop button).
+- Measured in three recorded explore runs (antennas held at rest, base driving and turning): the reading stays
+  within 0.44 deg of its median in two runs (encoder step 0.088 deg) and within 2.7 deg in the third (cause
+  unknown: a touch or a commanded move); within any 1 s window, p99 of the deviation <= 0.35 deg. **The base's
+  wobble and accelerations do not move the antennas measurably at P = 200**, so a threshold of a few degrees
+  would not false-trigger from driving.
+- `shutdown_error: 52` (bits overheating, electrical shock, overload): a sustained push against a position-held
+  antenna can trip the overload error and shut the motor down (it then needs a reboot of the motor).
+
+Assumptions (to measure):
+- Whether a light contact deflects a P = 200 antenna by more than a few degrees. If not, lower the antennas' P
+  gain (the controller writes PID gains: `async_write_pid_gains`), at the cost of more wobble noise.
+- That the antenna tips are the highest point of the robot on its base, and their height (the robot on its
+  base was taken as <= 0.40 m tall for the synthetic "under" labels): a chair seat (~0.45 m) or a dining table
+  is above it; low tables, sofa and bed edges, cabinet overhangs and chair rails are the cases it would catch.
+  The head is pitched 15 deg down while driving, so the tips lean forward.
+
+Design sketch:
+- Signal: |position - commanded rest| > ~2-3 deg on either antenna (to set from the noise measured with the
+  final P gain), debounced over 2 readings; reuse the existing poll (raise it to the daemon's 50 Hz) and keep
+  the 23 deg operator STOP as it is.
+- Reaction: STOP at once (as the operator STOP), then back off ~0.10 m straight, then mark an "overhang"
+  obstacle in the map at the antenna's position ahead of the robot so the planner routes around it (needs a
+  small new Navigator call to inject obstacle cells; today the map only takes scans). Never keep pushing: the
+  overload shutdown above.
+- Latency budget: 20-50 ms poll + one loop step to the base (BLE gaps normally < 0.14 s) + the balancing
+  base's stopping distance: ~0.1-0.25 s, i.e. 1.5-4 cm at 0.15 m/s, plus a few cm while the base leans back to
+  brake (inference from the glance test, where a 25 deg head pitch rolled the base 5 cm). The antenna must take
+  that deflection without overload: to check.
+
+Robot test protocol (each step needs a go):
+1. Robot on the floor, base off: push each antenna tip by hand (or with a spring gauge) in the four directions,
+   log deflection vs force at P = 200 and at lower gains.
+2. Base balancing, standing still, then teleop at 0.05 then 0.15 m/s, no contact: log the antenna noise for the
+   threshold.
+3. A light bar (broom handle on two chairs) at antenna height: teleop slowly under it with the detection
+   logging only (no reaction), then with the reaction on.
+
+### 360 deg looks with the Mini's body yaw
+
+See docs/SLAM.md, section 6: turning the Mini's body instead of the base for the explorer's and the SLAM's
+full looks.

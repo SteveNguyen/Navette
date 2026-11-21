@@ -117,6 +117,58 @@ corridors remain odometry-only.
 3. Ground truth: AprilTags on the floor (print, tape-measure positions) for the evaluation runs.
 4. Scope of version 1: drift correction within one run; map save / relocalisation later.
 
+## 6. Future: 360 deg looks with the Mini's body yaw (not started)
+
+Idea: for a full look (the SLAM's submaps, the explorer's final look), turn the Mini's body on its yaw joint
+instead of spinning the base: the camera's heading then comes from a motor encoder instead of wheel odometry
+during a spin (wheels slip in place), and the base only balances, so the frames of one look share almost the
+same base position.
+
+Facts (sources: the Reachy Mini SDK, local clone at commit 25756e7042, 2026-11-04; Navette main):
+- Body yaw range: +-160 deg (`kinematics/analytical_kinematics.py`, `max_body_yaw`; the placo kinematics use
+  +-2.8 rad), and the head can yaw +-65 deg relative to the body (`max_relative_yaw`; 55 deg in the placo
+  kinematics). Commanded with `goto_target(..., body_yaw=...)` or `set_target_body_yaw`; the body motor is a
+  Feetech servo in position mode (`body_rotation`, id 10, P = 200).
+- The head pose the SDK reports is the forward kinematics of all head joints, body yaw included (joint 0), in
+  the robot's root frame. Navette's camera pose is that head pose times the hand-eye transform
+  (`T_base_cam`, `robots/reachy_poussah/robot.py`), so **a yawed body is already measured per frame**.
+- The runtime already folds the camera's heading into the frame pose (`runtime/loop.py`: pose heading = base
+  heading + camera heading from `T_base_cam`) and already has a map-only path for frames taken while the head is
+  away from the driving pose: the head glance (`runtime/glance.py`, `Navigator.observe`: into the map only, no
+  behaviour step, base holding still).
+- Navette today always commands body yaw 0 (`set_nav_head`, `ReachyHead`); the explorer's final look and the
+  `slam` branch's `look360_m` turn the base (the final look on main integrates the commanded spin rate).
+
+Coverage (inference): with a ~70 deg useful horizontal field of view, body yaw alone covers headings within
++-195 deg of forward, i.e. the full circle with ~30 deg of overlap behind; adding the head's +-65 deg gives
+margin. Not measured: the body's speed (Feetech, position mode; the move duration is ours to set), so the time
+of a full look (estimate: 6-10 views of ~0.5-1 s each, settle included).
+
+Expected gain vs a base spin (inference, to measure): heading of each view from an encoder (0.088 deg steps)
+instead of integrated wheel odometry during a turn in place; no base translation during the turn except the
+balance reaction; no stop-start of a spin. Possible cost: with the head pitched 15 deg down, the head's centre
+of mass sits off the yaw axis, so turning the body shifts it and the balancing base rolls to compensate (the
+25 deg pitch glance rolled it 5 cm). The odometry measures that motion, and each frame keeps its own pose.
+
+Integration sketch:
+- A "look" sequence like the glance: hold still, body to a list of yaw stops (e.g. -150, -90, -30, +30, +90,
+  +150 deg, head yaw relative 0), settle, n frames into the map with `observe`, body back to 0, check it is
+  back. Frames during the moves are not used.
+- The explorer's look (`look360_m` on the `slam` branch, the final look on main) and the SLAM front end's
+  submap trigger use it instead of a base spin, behind a config flag (default: base spin, so goldens stay the
+  same).
+- Navigator steps (driving) only with the body back at 0: the navigator takes straight ahead in the image for
+  the driving direction (`camera_mount_warning`, 10 deg limit).
+- The SLAM front end gets a submap per body look directly (same base pose for all views).
+
+Robot test protocol (each step needs a go):
+1. Base off, Mini on the base: body yaw sweep -160..+160 deg at a few speeds; log the commanded vs measured yaw,
+   settle time, and whether the base or a cable limits the range.
+2. Base balancing, standing still: the same sweep with the head at the navigation pitch; log base odometry
+   (translation, heading) and the tilt during the sweep; check the floor model sees no part of the robot.
+3. One look sequence at a few spots, recorded; offline: build the submap from the body look and from a base
+   spin at the same spot, compare their sharpness and their match scores against each other.
+
 ## Sources
 
 Main references (full lists in the research notes): Sensors 2014 Kinect-as-laser (PMC4299068); iris_lama
